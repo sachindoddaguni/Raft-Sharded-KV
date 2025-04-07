@@ -1,10 +1,11 @@
 package shardkv
 
 import (
-	"6.824/shardctrler"
 	"crypto/rand"
 	"math/big"
 	"strconv"
+
+	"6.824/shardctrler"
 )
 
 //
@@ -22,6 +23,8 @@ const (
 	ErrWrongGroup       = "ErrWrongGroup"
 	ErrWrongLeader      = "ErrWrongLeader"
 	ErrServerNotUpdated = "ErrServerNotUpdated"
+	ErrNoGroupAvailable = "ErrNoGroupAvailable"
+	KeyLocked           = "KeyLocked"
 )
 
 type Err string
@@ -39,6 +42,12 @@ type PutAppendArgs struct {
 
 type PutAppendReply struct {
 	Err Err
+}
+
+type TxOp struct {
+	Ops           []Op
+	ClientId      int64
+	RequestNumber int32
 }
 
 type GetArgs struct {
@@ -71,4 +80,26 @@ func nrand() int64 {
 
 func termIndexToString(term int, index int) string {
 	return strconv.Itoa(term) + "." + strconv.Itoa(index)
+}
+
+type LockArgs struct {
+	Keys          []string
+	TxID          string
+	ClientId      int64
+	RequestNumber int32
+}
+
+type LockReply struct {
+	Err string
+}
+
+type UnlockArgs struct {
+	Keys          []string
+	TxID          string // The transaction that wants to release the locks.
+	ClientId      int64
+	RequestNumber int32
+}
+
+type UnlockReply struct {
+	Err string
 }

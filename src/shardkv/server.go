@@ -1,16 +1,18 @@
 package shardkv
 
 import (
-	"6.824/labrpc"
-	"6.824/shardctrler"
 	"bytes"
 	"log"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
+	"6.824/shardctrler"
 )
-import "6.824/raft"
-import "sync"
-import "6.824/labgob"
 
 const (
 	GET    = 0
@@ -58,6 +60,10 @@ type ShardKV struct {
 	lastConfig      shardctrler.Config
 	configUpdating  bool
 	shardLock       sync.RWMutex
+
+	// locking structures
+	lockTable   map[string]string
+	lockTableMu sync.Mutex
 }
 
 type InternalResp struct {
@@ -109,6 +115,90 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = OK
 		}
 	}
+}
+
+func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	txID := strconv.FormatInt(args.ClientId, 10) + "-" + strconv.Itoa(int(args.RequestNumber))
+	localKeys := []string{}
+	remoteKeys := make(map[int][]string)
+
+	// Loop over all operations in the transaction.
+	for _, op := range args.Ops {
+		key := op.Arg1
+		shard := key2shard(key)
+		gid := kv.config.Shards[shard]
+		if gid == kv.gid {
+			// Key belongs to this replica group.
+			localKeys = append(localKeys, key)
+		} else {
+			// Key belongs to a remote group.
+			remoteKeys[gid] = append(remoteKeys[gid], key)
+		}
+	}
+
+	kv.lockTableMu.Lock()
+	localLocked := true
+	for _, key := range localKeys {
+		current, exists := kv.lockTable[key]
+		if exists && current != "" && current != txID {
+			localLocked = false
+			log.Printf("ProcessTransaction: local key %v already locked by %v", key, current)
+			break
+		}
+		// Lock the key for this transaction.
+		kv.lockTable[key] = txID
+	}
+	kv.lockTableMu.Unlock()
+
+	// For each remote group, send a LockKeys RPC.
+	remoteLocked := true
+	for gid, keys := range remoteKeys {
+		lockArgs := &LockArgs{
+			Keys:          keys,
+			TxID:          txID,
+			ClientId:      int64(kv.me), // you may choose a different identifier here
+			RequestNumber: 0,            // you can assign a proper request number if needed
+		}
+		var lockReply LockReply
+		kv.mu.Lock()
+		servers, ok := kv.config.Groups[gid]
+		kv.mu.Unlock()
+		if !ok || len(servers) == 0 {
+			remoteLocked = false
+			log.Printf("ProcessTransaction: no servers available for remote group %v", gid)
+			break
+		}
+		lockedForGroup := false
+		for _, serverName := range servers {
+			srv := kv.make_end(serverName)
+			if srv.Call("ShardKV.LockKeys", lockArgs, &lockReply) {
+				if lockReply.Err == OK {
+					lockedForGroup = true
+					log.Printf("ProcessTransaction: remote keys %v locked in group %v", keys, gid)
+					break
+				}
+			}
+		}
+		if !lockedForGroup {
+			remoteLocked = false
+			log.Printf("ProcessTransaction: failed to lock keys %v in remote group %v", keys, gid)
+			break
+		}
+	}
+
+	if localLocked && remoteLocked {
+		reply.Err = OK
+		log.Printf("ProcessTransaction: txID %v: all keys locked successfully", txID)
+	} else {
+		reply.Err = "LockFailed"
+		log.Printf("ProcessTransaction: txID %v: locking failed", txID)
+	}
+
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -318,12 +408,10 @@ func (kv *ShardKV) inMyShard(key string) bool {
 	}
 }
 
-//
 // the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
-//
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	atomic.StoreInt32(&kv.dead, 1)
@@ -624,7 +712,6 @@ func (kv *ShardKV) GetShard(args *SendShardArgs, reply *SendShardReply) {
 	reply.Err = OK
 }
 
-//
 // servers[] contains the ports of the servers in this group.
 //
 // me is the index of the current server in servers[].
@@ -651,7 +738,6 @@ func (kv *ShardKV) GetShard(args *SendShardArgs, reply *SendShardReply) {
 //
 // StartServer() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
@@ -674,6 +760,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	kv.lockTable = make(map[string]string)
 
 	kv.config = shardctrler.Config{
 		Num:    0,
@@ -730,4 +818,31 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.configUpdater()
 
 	return kv
+}
+
+func (kv *ShardKV) LockKeys(args *LockArgs, reply *LockReply) {
+	kv.lockTableMu.Lock()
+	defer kv.lockTableMu.Unlock()
+	for _, key := range args.Keys {
+		if currentTx, ok := kv.lockTable[key]; ok && currentTx != "" && currentTx != args.TxID {
+			reply.Err = KeyLocked
+			return
+		}
+	}
+	for _, key := range args.Keys {
+		kv.lockTable[key] = args.TxID
+	}
+	reply.Err = OK
+}
+
+func (kv *ShardKV) UnlockKeys(args *UnlockArgs, reply *UnlockReply) {
+	kv.lockTableMu.Lock()
+	defer kv.lockTableMu.Unlock()
+
+	for _, key := range args.Keys {
+		if currentTx, ok := kv.lockTable[key]; ok && currentTx == args.TxID {
+			delete(kv.lockTable, key)
+		}
+	}
+	reply.Err = OK
 }
