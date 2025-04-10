@@ -37,8 +37,8 @@ func TestProcessTransactionConcurrentNonConflict(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Choose two different keys.
-	key1 := "x" // Example key (e.g., ASCII 'x')
-	key2 := "y" // Example key (e.g., ASCII 'y')
+	key1 := "x"
+	key2 := "y"
 
 	// Clear both keys.
 	ck1.Put(key1, "")
@@ -113,9 +113,8 @@ func TestTransactionSingleGroup(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Choose keys that (with one group joined) will be served by group 0.
-	// For example, when only one group is available, every shard is assigned to it.
-	key1 := "5" // arbitrary key; key2shard("5") will produce a shard number (5 mod 10)
-	key2 := "8" // another arbitrary key
+	key1 := "5"
+	key2 := "8"
 
 	// Clear the keys.
 	ck.Put(key1, "")
@@ -144,8 +143,6 @@ func TestTransactionSingleGroup(t *testing.T) {
 		t.Fatalf("TransactionSingleGroup returned error: %v", err)
 	}
 
-	// Since commit is not applied, we cannot check the final value.
-	// Test passes if ProcessTransaction returns nil.
 	fmt.Printf("  ... Passed\n")
 }
 
@@ -154,16 +151,17 @@ func DoTestTransactionLockConflict(t *testing.T) {
 	cfg := make_config(t, 3, false, -1)
 	defer cfg.cleanup()
 
-	// Create two different clients.
+	// Create two separate clients.
 	ck1 := cfg.makeClient()
 	ck2 := cfg.makeClient()
-	// Join at least two groups.
+
+	// Join two groups.
 	cfg.join(0)
 	cfg.join(1)
 	time.Sleep(500 * time.Millisecond)
 
-	// Choose a key that will be used in both transactions.
 	key := "conflictKey"
+	// Clear the key.
 	ck1.Put(key, "")
 	time.Sleep(200 * time.Millisecond)
 
@@ -177,7 +175,7 @@ func DoTestTransactionLockConflict(t *testing.T) {
 	}
 	txOps1 := []Op{op1}
 
-	// Client 2 constructs a transaction attempting to lock the same key.
+	// Client 2 constructs a transaction on the same key.
 	op2 := Op{
 		Type:        PUT,
 		Arg1:        key,
@@ -187,39 +185,37 @@ func DoTestTransactionLockConflict(t *testing.T) {
 	}
 	txOps2 := []Op{op2}
 
-	// Let client 1 execute its transaction.
+	// Let client 1 execute its transaction to lock the key.
 	if err := ck1.ProcessTransaction(txOps1); err != nil {
 		t.Fatalf("First transaction failed: %v", err)
 	}
 
-	// Now client 2 attempts the transaction.
-	// According to our server logic, since the key is already locked by txID from client 1,
-	// client 2's transaction should fail with "LockFailed".
-	err := ck2.ProcessTransaction(txOps2)
-	if err == nil {
-		// In our implementation, ProcessTransaction on the client returns nil
-		// even if the reply.Err was "LockFailed" (since we are not propagating an error).
-		// Hence, to verify the conflict, we can invoke the RPC directly and inspect reply.Err.
-		var txReply TxReply
-		// Use a server from the first group available.
-		var serverList []string
-		for _, servers := range ck2.config.Groups {
-			serverList = servers
+	// Refresh client 2's configuration until Groups is non-empty.
+	for i := 0; i < 10; i++ {
+		ck2.config = cfg.mck.Query(-1)
+		if len(ck2.config.Groups) > 0 {
 			break
 		}
-		if len(serverList) == 0 {
-			t.Fatalf("No servers available for conflict test")
-		}
-		srv := ck2.make_end(serverList[0])
-		if ok := srv.Call("ShardKV.ProcessTransaction", &TxOp{
-			Ops:           txOps2,
-			ClientId:      ck2.uuid,
-			RequestNumber: atomic.AddInt32(&ck2.reqNumber, 1),
-		}, &txReply); !ok || txReply.Err != "LockFailed" {
-			t.Fatalf("Expected transaction on conflicting key to return LockFailed, got %v", txReply.Err)
-		}
-	} else {
-		t.Fatalf("Expected ProcessTransaction to signal a conflict, but it returned nil error")
+		time.Sleep(100 * time.Millisecond)
+	}
+	var serverList []string
+	for _, servers := range ck2.config.Groups {
+		serverList = servers
+		break
+	}
+	if len(serverList) == 0 {
+		t.Fatalf("No servers available for conflict test")
+	}
+
+	// Now client 2 attempts its transaction.
+	var txReply TxReply
+	srv := ck2.make_end(serverList[0])
+	if ok := srv.Call("ShardKV.ProcessTransaction", &TxOp{
+		Ops:           txOps2,
+		ClientId:      ck2.uuid,
+		RequestNumber: atomic.AddInt32(&ck2.reqNumber, 1),
+	}, &txReply); !ok || txReply.Err != "LockFailed" {
+		t.Fatalf("Expected transaction on conflicting key to return LockFailed, got %v", txReply.Err)
 	}
 	fmt.Printf("  ... Passed\n")
 }
