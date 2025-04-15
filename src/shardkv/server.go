@@ -64,6 +64,9 @@ type ShardKV struct {
 	// locking structures
 	lockTable   map[string]string
 	lockTableMu sync.Mutex
+
+	ContainerId string
+	Port        string
 }
 
 type InternalResp struct {
@@ -118,22 +121,27 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
+	// First, ensure this server is the leader.
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	txID := strconv.FormatInt(args.ClientId, 10) + "-" + strconv.Itoa(int(args.RequestNumber))
-	localKeys := []string{}
-	remoteKeys := make(map[int][]string)
 
-	// Loop over all operations in the transaction.
+	// Create a transaction ID from the client ID and request number.
+	txID := strconv.FormatInt(args.ClientId, 10) + "-" + strconv.Itoa(int(args.RequestNumber))
+
+	// Prepare slices for local keys and a map for remote keys.
+	localKeys := []string{}
+	remoteKeys := make(map[int][]string) // key: gid, value: list of keys
+
+	// Iterate through each operation in the transaction.
 	for _, op := range args.Ops {
 		key := op.Arg1
 		shard := key2shard(key)
 		gid := kv.config.Shards[shard]
 		if gid == kv.gid {
-			// Key belongs to this replica group.
+			// Key belongs to the local replica group.
 			localKeys = append(localKeys, key)
 		} else {
 			// Key belongs to a remote group.
@@ -141,6 +149,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 		}
 	}
 
+	// Attempt to lock local keys.
 	kv.lockTableMu.Lock()
 	localLocked := true
 	for _, key := range localKeys {
@@ -155,16 +164,23 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	}
 	kv.lockTableMu.Unlock()
 
-	// For each remote group, send a LockKeys RPC.
+	// Variable to record remote locking success.
 	remoteLocked := true
+	// We'll keep track of which remote groups we have successfully locked keys.
+	lockedRemoteGroups := make(map[int]bool)
+
+	// For each remote group, send a LockKeys RPC.
 	for gid, keys := range remoteKeys {
+		// Prepare RPC arguments.
 		lockArgs := &LockArgs{
 			Keys:          keys,
 			TxID:          txID,
-			ClientId:      int64(kv.me), // you may choose a different identifier here
-			RequestNumber: 0,            // you can assign a proper request number if needed
+			ClientId:      int64(kv.me), // using local server id for identification
+			RequestNumber: 0,            // or assign a proper request number if needed
 		}
 		var lockReply LockReply
+
+		// Look up the list of servers for the remote group.
 		kv.mu.Lock()
 		servers, ok := kv.config.Groups[gid]
 		kv.mu.Unlock()
@@ -173,13 +189,16 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 			log.Printf("ProcessTransaction: no servers available for remote group %v", gid)
 			break
 		}
+
 		lockedForGroup := false
+		// Try each server in the remote group.
 		for _, serverName := range servers {
 			srv := kv.make_end(serverName)
 			if srv.Call("ShardKV.LockKeys", lockArgs, &lockReply) {
 				if lockReply.Err == OK {
 					lockedForGroup = true
-					log.Printf("ProcessTransaction: remote keys %v locked in group %v", keys, gid)
+					lockedRemoteGroups[gid] = true
+					log.Printf("ProcessTransaction: remote keys %v locked in group %v for txID %v", keys, gid, txID)
 					break
 				}
 			}
@@ -191,14 +210,55 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 		}
 	}
 
-	if localLocked && remoteLocked {
-		reply.Err = OK
-		log.Printf("ProcessTransaction: txID %v: all keys locked successfully", txID)
-	} else {
+	// If locking failed (local or remote), we must release any locks acquired.
+	if !(localLocked && remoteLocked) {
+		// Release local locks.
+		kv.lockTableMu.Lock()
+		for _, key := range localKeys {
+			if current, exists := kv.lockTable[key]; exists && current == txID {
+				delete(kv.lockTable, key)
+			}
+		}
+		kv.lockTableMu.Unlock()
+
+		// For each remote group that was locked, send an Unlock RPC.
+		for gid, locked := range lockedRemoteGroups {
+			if locked {
+				// Prepare unlock arguments.
+				unlockArgs := &UnlockArgs{
+					Keys:          remoteKeys[gid],
+					TxID:          txID,
+					ClientId:      int64(kv.me),
+					RequestNumber: 0,
+				}
+				var unlockReply UnlockReply
+				kv.mu.Lock()
+				servers, ok := kv.config.Groups[gid]
+				kv.mu.Unlock()
+				if ok && len(servers) > 0 {
+					for _, serverName := range servers {
+						srv := kv.make_end(serverName)
+						// Send the Unlock RPC.
+						srv.Call("ShardKV.UnlockKeys", unlockArgs, &unlockReply)
+						// We can break once one server successfully unlocks.
+						// (Assuming UnlockKeys is idempotent.)
+						break
+					}
+				}
+			}
+		}
+
 		reply.Err = "LockFailed"
 		log.Printf("ProcessTransaction: txID %v: locking failed", txID)
+		return
 	}
 
+	// If we get here, all keys (local and remote) have been locked.
+	reply.Err = OK
+	log.Printf("ProcessTransaction: txID %v: all keys locked successfully", txID)
+
+	// Continue with further transaction coordination (e.g., preparing, then commit).
+	// ...
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -759,7 +819,17 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.dead = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	containerName := "server-" + strconv.Itoa(gid) + "-" + strconv.Itoa(me) + "-container"
+	containerID, hostPort, err := createContainer("shard-kv:latest", containerName)
+	if err != nil {
+		log.Fatalf("Failed to create shard server container for %s: %v", containerName, err)
+	}
+	kv.ContainerId = containerID
+	kv.Port = hostPort
+	log.Printf("Shard server %s container created: ID=%s, hostPort=%s", containerName, containerID, hostPort)
+
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, hostPort)
 
 	kv.lockTable = make(map[string]string)
 

@@ -3,9 +3,20 @@ package shardkv
 import (
 	"crypto/rand"
 	"math/big"
+	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"6.824/shardctrler"
+
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 )
 
 //
@@ -102,4 +113,98 @@ type UnlockArgs struct {
 
 type UnlockReply struct {
 	Err string
+}
+
+// createLogContainer creates and starts a container from the given image and containerName,
+// binding the container's port 8080 to a host port. If hostPort is empty (""), Docker
+// is instructed to assign a random available port. The function returns the container ID
+// and the actual host port that was assigned.
+func createContainer(image, containerName string) (string, string, error) {
+	// Create a Docker client.
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create Docker client: %v", err)
+	}
+	ctx := context.Background()
+
+	// Prepare the container configuration: expose port 8080.
+	config := &container.Config{
+		Image: image,
+		ExposedPorts: nat.PortSet{
+			"8080/tcp": struct{}{},
+		},
+		Tty: false,
+	}
+
+	hostPort := "0"
+
+	// Set up host configuration with port binding.
+	hostConfig := &container.HostConfig{
+		PortBindings: nat.PortMap{
+			"8080/tcp": []nat.PortBinding{
+				{
+					HostIP:   "0.0.0.0",
+					HostPort: hostPort, // Docker assigns a random port if "0" is passed.
+				},
+			},
+		},
+	}
+
+	// Create the container.
+	resp, err := cli.ContainerCreate(ctx, config, hostConfig, nil, nil, containerName)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create container: %v", err)
+	}
+
+	// Start the container.
+	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return "", "", fmt.Errorf("failed to start container: %v", err)
+	}
+
+	// Allow a short time for Docker to set up the port mapping.
+	time.Sleep(500 * time.Millisecond)
+
+	// Inspect the container to get the assigned host port.
+	inspect, err := cli.ContainerInspect(ctx, resp.ID)
+	if err != nil {
+		return resp.ID, "", fmt.Errorf("failed to inspect container: %v", err)
+	}
+	// Look up the assigned host port for container port "8080/tcp".
+	bindings, ok := inspect.NetworkSettings.Ports["8080/tcp"]
+	if !ok || len(bindings) == 0 {
+		return resp.ID, "", fmt.Errorf("failed to obtain port mapping for 8080/tcp")
+	}
+	assignedHostPort := bindings[0].HostPort
+
+	log.Printf("Container %s started with ID: %s, binding container port 8080 to host port %s", containerName, resp.ID, assignedHostPort)
+	return resp.ID, assignedHostPort, nil
+}
+
+func logToServer(port string, message string) error {
+	// Construct the URL where the log server is listening.
+	url := "http://localhost:" + port + "/log"
+
+	// Create a new POST request with the log message as the body.
+	req, err := http.NewRequest("POST", url, strings.NewReader(message))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+
+	// Create an HTTP client with a timeout.
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	// Send the request.
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check the response status code.
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected response status: %v", resp.Status)
+	}
+
+	return nil
 }

@@ -265,6 +265,8 @@ func (cfg *config) StartServer(gi int, i int) {
 	srv.AddService(kvsvc)
 	srv.AddService(rfsvc)
 	cfg.net.AddServer(cfg.servername(gg.gid, i), srv)
+
+	log.Printf("Started Server %v for group %v", i, gg.gid)
 }
 
 func (cfg *config) StartGroup(gi int) {
@@ -325,6 +327,7 @@ func (cfg *config) joinm(gis []int) {
 	}
 	log.Printf("gids: %v joined", gis)
 	cfg.mck.Join(m)
+	log.Printf("Control server is started")
 }
 
 // tell the shardctrler that a group is leaving.
@@ -384,6 +387,8 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 	cfg.nextClientId = cfg.n + 1000 // client ids start 1000 above the highest serverid
 
 	cfg.net.Reliable(!unreliable)
+
+	log.Printf("Environment setup is done with: %v servers", n)
 
 	return cfg
 }

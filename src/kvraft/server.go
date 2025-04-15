@@ -1,14 +1,15 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
 	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
 const Debug = false
@@ -72,7 +73,7 @@ func (kv *KVServer) GetKV() *map[string]string {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	//// log.Printf("kv server %d recvd req:", kv.me)
+	log.Printf("kv server %d recvd req:", kv.me)
 	raftCmd := Op{
 		Type:        GET,
 		Arg1:        args.Key,
@@ -98,14 +99,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Value = resp.Reply
 			reply.Err = OK
-			//// log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
+			log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
 			//kv.rf.PrintState()
 		}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	//// log.Printf("kv server %d recvd req:", kv.me)
+	log.Printf("kv server %d recvd req:", kv.me)
 	opType := PUT
 	if args.Op == "Append" {
 		opType = APPEND
@@ -135,13 +136,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = ErrWrongLeader
 		} else {
 			reply.Err = OK
-			//// log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
+			log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
 			//kv.rf.PrintState()
 		}
 	}
 }
 
-//
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -150,7 +150,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // code to Kill(). you're not required to do anything
 // about this, but it may be convenient (for example)
 // to suppress debug output from a Kill()ed instance.
-//
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
@@ -285,7 +284,6 @@ func (kv *KVServer) stateCompactor() {
 	}
 }
 
-//
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -298,7 +296,6 @@ func (kv *KVServer) stateCompactor() {
 // you don't need to snapshot.
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
@@ -313,7 +310,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, "")
 
 	kv.kv = make(map[string]string)
 	kv.lastClientCommandReply = make(map[int64]InternalResp)

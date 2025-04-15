@@ -1,14 +1,16 @@
 package shardctrler
 
 import (
-	"6.824/raft"
 	"log"
 	"sort"
+	"strconv"
+	"sync"
 	"sync/atomic"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
-import "6.824/labrpc"
-import "sync"
-import "6.824/labgob"
 
 const (
 	JOIN  = 0
@@ -43,6 +45,8 @@ type ShardCtrler struct {
 	lastClientCommandReply map[int64]InternalResp
 	ReplyWaitChan          map[string]chan *InternalResp
 	lastApplied            int
+	ContainerId            string
+	Port                   string
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
@@ -182,12 +186,10 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}
 }
 
-//
 // the tester calls Kill() when a ShardCtrler instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
-//
 func (sc *ShardCtrler) Kill() {
 	sc.rf.Kill()
 	atomic.StoreInt32(&sc.isKilled, 1)
@@ -387,12 +389,10 @@ func (sc *ShardCtrler) handleMove(shard int, GID int) {
 	sc.configs = append(sc.configs, newConfig)
 }
 
-//
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant shardctrler service.
 // me is the index of the current server in servers[].
-//
 func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister) *ShardCtrler {
 	sc := new(ShardCtrler)
 	sc.me = me
@@ -409,8 +409,17 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	labgob.Register([]int{})
 	labgob.Register(MoveInfo{})
 
+	containerName := "ctrler" + strconv.Itoa(me) + "-container"
+	containerID, port, err := createContainer("shard-kv:latest", containerName)
+	if err != nil {
+		log.Fatalf("Failed to create control server container %s: %v", containerName, err)
+	}
+	sc.ContainerId = containerID
+	sc.Port = port
+	log.Printf("Control server %s container created: %s", containerName, containerID)
+
 	sc.applyCh = make(chan raft.ApplyMsg)
-	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
+	sc.rf = raft.Make(servers, me, persister, sc.applyCh, port)
 	sc.isKilled = 0
 	sc.lastApplied = 0
 	sc.lastClientCommandReply = make(map[int64]InternalResp)

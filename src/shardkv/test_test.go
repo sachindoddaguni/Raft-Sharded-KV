@@ -939,3 +939,20 @@ func TestChallenge2Partial(t *testing.T) {
 
 	fmt.Printf("  ... Passed\n")
 }
+
+func TestTransactions(t *testing.T) {
+	fmt.Printf("Test: transactions ...\n")
+	cfg := make_config(t, 3, false, -1)
+	cfg.join(0)
+	cfg.join(1)
+	ck := cfg.makeClient()
+	defer cfg.cleanup()
+	op1 := Op{
+		Type:        GET,
+		Arg1:        "x",
+		Arg2:        "",
+		ClientUuid:  1,
+		ClientReqNo: 1,
+	}
+	ck.ProcessTransaction([]Op{op1})
+}

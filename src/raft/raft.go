@@ -1,14 +1,16 @@
 package raft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
 	"bytes"
+	"fmt"
 	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
 )
 
 //
@@ -28,7 +30,6 @@ import (
 //   in the same server.
 //
 
-//
 // as each Raft peer becomes aware that successive Log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -38,7 +39,7 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
-//x
+// x
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -110,6 +111,8 @@ type Raft struct {
 	userApplyChan chan ApplyMsg
 
 	indirectApplyChan chan *ApplyMsg
+
+	Port string
 }
 
 func (rf *Raft) GetRaftStateSize() int {
@@ -127,7 +130,6 @@ func (rf *Raft) PrintState() {
 	//// log.Printf("server %d: match index: %v, next index: %v", rf.me, rf.matchIndex, rf.nextIndex)
 }
 
-//
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // Assumes that the caller holds mutex and state is consistent
@@ -146,15 +148,13 @@ func (rf *Raft) persist(saveSnapShot bool) {
 	}
 }
 
-//
 // restore previously persisted state.
-//
 func (rf *Raft) readPersist() {
 	data := rf.persister.ReadRaftState()
 	rf.snapShot = rf.persister.ReadSnapshot()
 	if data == nil || len(data) < 1 {
 		rf.snapShot = nil
-		////// log.Printf("Restoring from empty state")
+		log.Printf("Restoring from empty state")
 		return
 	}
 
@@ -178,10 +178,8 @@ func (rf *Raft) readPersist() {
 	rf.commitIndex = rf.baseIndex
 }
 
-//
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
-//
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	// deprecated
 	return true
@@ -247,10 +245,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// log.Printf("raft %d: created snapshot and compacted logs, logLen: %d, stateSize: %d", rf.me, len(rf.Log), rf.persister.RaftStateSize())
 }
 
-//
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
-//
 type RequestVoteArgs struct {
 	Term         int
 	CandidateId  int
@@ -258,10 +254,8 @@ type RequestVoteArgs struct {
 	LastLogIndex int
 }
 
-//
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
-//
 type RequestVoteReply struct {
 	Term        int
 	VoteGranted bool
@@ -342,13 +336,18 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//defer rf.PrintState()
-	////// log.Printf("Server %d received vote request: %v", rf.me, args)
+	formatted := fmt.Sprintf("Server %d received vote request: %v", rf.me, args)
+
+	logToServer(rf.Port, formatted)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		//// log.Printf("Server %d voted no for %d in term %d due to my term > his, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
+
+		formatted = fmt.Sprintf("Server %d voted no for %d in term %d due to my term > his, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
+		logToServer(rf.Port, formatted)
 		return
 	}
 	if args.Term > rf.currentTerm || (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
@@ -367,7 +366,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.currentTerm = args.Term
 				rf.convertToFollower(-1)
 			}
-			//// log.Printf("Server %d voted no for %d in term %d due to me more updated than him, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
+			formatted = fmt.Sprintf("Server %d voted no for %d in term %d due to me more updated than him, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
+			logToServer(rf.Port, formatted)
 			return
 		}
 		// Candidate is atleast as uptodate as me
@@ -377,14 +377,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if newVote {
 			rf.convertToFollower(args.CandidateId)
 		}
-		////// log.Printf("Server %d voted for %d in term %d, reply: %v", rf.me, rf.votedFor, rf.currentTerm, reply)
+		formatted = fmt.Sprintf("Server %d voted for %d in term %d, reply: %v", rf.me, rf.votedFor, rf.currentTerm, reply)
+		logToServer(rf.Port, formatted)
 	} else {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	}
 }
 
-//
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -412,9 +412,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-//
 func (rf *Raft) sendRequestVote(voteChan chan bool, server int, args *RequestVoteArgs) bool {
-	//// log.Printf("Server %d: Sending voteRequest %v to server %d", rf.me, *args, server)
+	log.Printf("Server %d: Sending voteRequest %v to server %d", rf.me, *args, server)
 	reply := RequestVoteReply{}
 
 	//atomic.AddInt32(&rf.rpcCount, 1)
@@ -658,7 +657,8 @@ func (rf *Raft) committer() {
 				SnapshotTerm:  0,
 				SnapshotIndex: 0,
 			}
-			//// log.Printf("server %d: applied entry: %v", rf.me, entry)
+			formatted := fmt.Sprintf("server %d: applied entry: %v", rf.me, entry)
+			logToServer(rf.Port, formatted)
 			rf.LastApplied++
 		}
 
@@ -799,7 +799,6 @@ func (rf *Raft) appendEntryHandler(server int) {
 
 }
 
-//
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's Log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -812,7 +811,6 @@ func (rf *Raft) appendEntryHandler(server int) {
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
-//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.killed() {
 		return -1, -1, false
@@ -849,7 +847,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-//
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -859,7 +856,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
-//
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
@@ -887,7 +883,8 @@ func (rf *Raft) convertToLeader() {
 			rf.leaderPromoteNotifyChan[i] <- rf.currentTerm
 		}
 	}
-	// log.Printf("raft: leader elected %d", rf.me)
+	formatted := fmt.Sprintf("raft: leader elected %d", rf.me)
+	logToServer(rf.Port, formatted)
 	//rf.PrintState()
 }
 
@@ -901,6 +898,8 @@ func (rf *Raft) convertToFollower(votedFor int) {
 
 	rf.currentState = FOLLOWER
 	rf.persist(false)
+	formatted := fmt.Sprintf("Server %d converted to follower", rf.me)
+	logToServer(rf.Port, formatted)
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -974,7 +973,6 @@ func (rf *Raft) ticker() {
 	}
 }
 
-//
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -984,13 +982,13 @@ func (rf *Raft) ticker() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg, port string) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.Port = port
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
