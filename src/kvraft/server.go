@@ -73,7 +73,7 @@ func (kv *KVServer) GetKV() *map[string]string {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	log.Printf("kv server %d recvd req:", kv.me)
+	// log.Printf("kv server %d recvd req:", kv.me)
 	raftCmd := Op{
 		Type:        GET,
 		Arg1:        args.Key,
@@ -99,14 +99,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Value = resp.Reply
 			reply.Err = OK
-			log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
+			// log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
 			//kv.rf.PrintState()
 		}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	log.Printf("kv server %d recvd req:", kv.me)
+	// log.Printf("kv server %d recvd req:", kv.me)
 	opType := PUT
 	if args.Op == "Append" {
 		opType = APPEND
@@ -136,7 +136,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = ErrWrongLeader
 		} else {
 			reply.Err = OK
-			log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
+			// log.Printf("server %d: completed req: %v, state :%v", kv.me, args, kv.kv)
 			//kv.rf.PrintState()
 		}
 	}

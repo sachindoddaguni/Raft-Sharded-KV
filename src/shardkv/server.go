@@ -2,8 +2,11 @@ package shardkv
 
 import (
 	"bytes"
+	"fmt"
 	"log"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,9 +18,11 @@ import (
 )
 
 const (
-	GET    = 0
-	PUT    = 1
-	APPEND = 2
+	GET         = 0
+	PUT         = 1
+	APPEND      = 2
+	LOCK_KEYS   = 3
+	UNLOCK_KEYS = 4
 )
 
 type Op struct {
@@ -26,6 +31,7 @@ type Op struct {
 	Arg2        string
 	ClientUuid  int64
 	ClientReqNo int32
+	TxID        string
 }
 
 type ConfigChange struct {
@@ -120,145 +126,301 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	}
 }
 
+func logTransaction(kvPort string, txID string, ops []Op) {
+	var b strings.Builder
+	// header
+	b.WriteString(fmt.Sprintf("=== Transaction %s ===\n", txID))
+
+	// each op on its own line, indented
+	for i, op := range ops {
+		switch op.Type {
+		case GET:
+			b.WriteString(fmt.Sprintf("  %2d) GET    key=%q\n", i+1, op.Arg1))
+		case PUT:
+			b.WriteString(fmt.Sprintf("  %2d) PUT    key=%q, val=%q\n", i+1, op.Arg1, op.Arg2))
+		}
+	}
+
+	// footer
+	b.WriteString("========================\n")
+
+	// send it off
+	logToServer(kvPort, b.String())
+}
+
 func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
-	// First, ensure this server is the leader.
+	// 1) Leader check
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	// Create a transaction ID from the client ID and request number.
+	// 2) Build txID
 	txID := strconv.FormatInt(args.ClientId, 10) + "-" + strconv.Itoa(int(args.RequestNumber))
+	logToServer(kv.Port, fmt.Sprintf("tx %s: I am the coordinator on group %d", txID, kv.gid))
+	logTransaction(kv.Port, txID, args.Ops)
 
-	// Prepare slices for local keys and a map for remote keys.
-	localKeys := []string{}
-	remoteKeys := make(map[int][]string) // key: gid, value: list of keys
-
-	// Iterate through each operation in the transaction.
+	// 3) Partition keys into local vs remote
+	localKeys := make([]string, 0, len(args.Ops))
+	remoteKeys := make(map[int][]string)
 	for _, op := range args.Ops {
 		key := op.Arg1
 		shard := key2shard(key)
 		gid := kv.config.Shards[shard]
 		if gid == kv.gid {
-			// Key belongs to the local replica group.
 			localKeys = append(localKeys, key)
 		} else {
-			// Key belongs to a remote group.
 			remoteKeys[gid] = append(remoteKeys[gid], key)
 		}
 	}
 
-	// Attempt to lock local keys.
-	kv.lockTableMu.Lock()
-	localLocked := true
-	for _, key := range localKeys {
-		current, exists := kv.lockTable[key]
-		if exists && current != "" && current != txID {
-			localLocked = false
-			log.Printf("ProcessTransaction: local key %v already locked by %v", key, current)
-			break
-		}
-		// Lock the key for this transaction.
-		kv.lockTable[key] = txID
+	logToServer(kv.Port, "Starting prepare phase for the transaction")
+
+	// 4) Log the distribution
+	var dist strings.Builder
+	dist.WriteString(fmt.Sprintf("tx %s key distribution:\n  local keys: %v", txID, localKeys))
+	gids := make([]int, 0, len(remoteKeys))
+	for gid := range remoteKeys {
+		gids = append(gids, gid)
 	}
-	kv.lockTableMu.Unlock()
+	sort.Ints(gids)
+	for _, gid := range gids {
+		dist.WriteString(fmt.Sprintf("\n  remote group %d keys: %v", gid, remoteKeys[gid]))
+	}
+	logToServer(kv.Port, dist.String())
 
-	// Variable to record remote locking success.
-	remoteLocked := true
-	// We'll keep track of which remote groups we have successfully locked keys.
-	lockedRemoteGroups := make(map[int]bool)
+	// 5) Lock local keys via RPC to ourselves
+	lockedLocal := make([]string, 0, len(localKeys))
+	conflictsLocal := make([]string, 0)
+	localOK := true
 
-	// For each remote group, send a LockKeys RPC.
-	for gid, keys := range remoteKeys {
-		// Prepare RPC arguments.
-		lockArgs := &LockArgs{
-			Keys:          keys,
-			TxID:          txID,
-			ClientId:      int64(kv.me), // using local server id for identification
-			RequestNumber: 0,            // or assign a proper request number if needed
-		}
+	for _, key := range localKeys {
+		args.RequestNumber += 1
+		lockArgs := &LockArgs{Keys: []string{key}, TxID: txID, RequestNumber: args.RequestNumber}
 		var lockReply LockReply
-
-		// Look up the list of servers for the remote group.
-		kv.mu.Lock()
-		servers, ok := kv.config.Groups[gid]
-		kv.mu.Unlock()
-		if !ok || len(servers) == 0 {
-			remoteLocked = false
-			log.Printf("ProcessTransaction: no servers available for remote group %v", gid)
+		// try each replica in our own group until one succeeds
+		got := false
+		for _, srvName := range kv.config.Groups[kv.gid] {
+			srv := kv.make_end(srvName)
+			if srv.Call("ShardKV.LockKeys", lockArgs, &lockReply) && lockReply.Err == OK {
+				got = true
+				lockedLocal = append(lockedLocal, key)
+				break
+			}
+		}
+		if !got {
+			localOK = false
+			conflictsLocal = append(conflictsLocal, fmt.Sprintf("%s locked by other tx", key))
 			break
 		}
+	}
 
-		lockedForGroup := false
-		// Try each server in the remote group.
-		for _, serverName := range servers {
-			srv := kv.make_end(serverName)
-			if srv.Call("ShardKV.LockKeys", lockArgs, &lockReply) {
-				if lockReply.Err == OK {
-					lockedForGroup = true
-					lockedRemoteGroups[gid] = true
-					log.Printf("ProcessTransaction: remote keys %v locked in group %v for txID %v", keys, gid, txID)
+	if !localOK {
+		// roll back any local locks we did get
+		for _, key := range lockedLocal {
+			unlockArgs := &UnlockArgs{Keys: []string{key}, TxID: txID}
+			var ur UnlockReply
+			for _, srvName := range kv.config.Groups[kv.gid] {
+				srv := kv.make_end(srvName)
+				if srv.Call("ShardKV.UnlockKeys", unlockArgs, &ur) && ur.Err == OK {
 					break
 				}
 			}
 		}
-		if !lockedForGroup {
-			remoteLocked = false
-			log.Printf("ProcessTransaction: failed to lock keys %v in remote group %v", keys, gid)
+		logToServer(kv.Port, fmt.Sprintf(
+			"tx %s: FAILED to lock local keys. successes=%v, conflicts=%v",
+			txID, lockedLocal, conflictsLocal,
+		))
+		reply.Err = "LockFailed"
+		return
+	}
+	logToServer(kv.Port, fmt.Sprintf("tx %s: successfully locked local keys %v", txID, lockedLocal))
+
+	// 6) Lock remote keys
+	remoteOK := true
+	lockedRemote := make(map[int][]string)
+	failedRemote := make(map[int][]string)
+
+	for gid, keys := range remoteKeys {
+		args.RequestNumber += 1
+		lockArgs := &LockArgs{Keys: keys, TxID: txID, RequestNumber: args.RequestNumber}
+		got := false
+
+		for _, srvName := range kv.config.Groups[gid] {
+			srv := kv.make_end(srvName)
+			var lockReply LockReply
+			if srv.Call("ShardKV.LockKeys", lockArgs, &lockReply) && lockReply.Err == OK {
+				got = true
+				lockedRemote[gid] = keys
+				logToServer(kv.Port, fmt.Sprintf(
+					"tx %s: locked remote keys %v on group %d",
+					txID, keys, gid))
+				break
+			}
+		}
+		if !got {
+			remoteOK = false
+			failedRemote[gid] = keys
+			logToServer(kv.Port, fmt.Sprintf(
+				"tx %s: FAILED to lock remote keys %v on group %d",
+				txID, keys, gid))
 			break
 		}
 	}
 
-	// If locking failed (local or remote), we must release any locks acquired.
-	if !(localLocked && remoteLocked) {
-		// Release local locks.
-		kv.lockTableMu.Lock()
-		for _, key := range localKeys {
-			if current, exists := kv.lockTable[key]; exists && current == txID {
-				delete(kv.lockTable, key)
-			}
-		}
-		kv.lockTableMu.Unlock()
-
-		// For each remote group that was locked, send an Unlock RPC.
-		for gid, locked := range lockedRemoteGroups {
-			if locked {
-				// Prepare unlock arguments.
-				unlockArgs := &UnlockArgs{
-					Keys:          remoteKeys[gid],
-					TxID:          txID,
-					ClientId:      int64(kv.me),
-					RequestNumber: 0,
-				}
-				var unlockReply UnlockReply
-				kv.mu.Lock()
-				servers, ok := kv.config.Groups[gid]
-				kv.mu.Unlock()
-				if ok && len(servers) > 0 {
-					for _, serverName := range servers {
-						srv := kv.make_end(serverName)
-						// Send the Unlock RPC.
-						srv.Call("ShardKV.UnlockKeys", unlockArgs, &unlockReply)
-						// We can break once one server successfully unlocks.
-						// (Assuming UnlockKeys is idempotent.)
-						break
-					}
+	if !remoteOK {
+		// roll back local locks
+		for _, key := range lockedLocal {
+			unlockArgs := &UnlockArgs{Keys: []string{key}, TxID: txID}
+			var ur UnlockReply
+			for _, srvName := range kv.config.Groups[kv.gid] {
+				srv := kv.make_end(srvName)
+				if srv.Call("ShardKV.UnlockKeys", unlockArgs, &ur) && ur.Err == OK {
+					break
 				}
 			}
 		}
-
+		// roll back any remote locks we did get
+		for gid, keys := range lockedRemote {
+			unlockArgs := &UnlockArgs{Keys: keys, TxID: txID}
+			var ur UnlockReply
+			for _, srvName := range kv.config.Groups[gid] {
+				srv := kv.make_end(srvName)
+				if srv.Call("ShardKV.UnlockKeys", unlockArgs, &ur) && ur.Err == OK {
+					break
+				}
+			}
+		}
 		reply.Err = "LockFailed"
-		log.Printf("ProcessTransaction: txID %v: locking failed", txID)
 		return
 	}
 
-	// If we get here, all keys (local and remote) have been locked.
-	reply.Err = OK
-	log.Printf("ProcessTransaction: txID %v: all keys locked successfully", txID)
+	logToServer(kv.Port, fmt.Sprintf(
+		"tx %s: all keys locked successfully: local=%v remote=%v",
+		txID, lockedLocal, lockedRemote,
+	))
 
-	// Continue with further transaction coordination (e.g., preparing, then commit).
-	// ...
+	// ... now proceed to 2PC prepare / commit ...
+
+	logToServer(kv.Port, "Starting COMMIT phase for the transaction")
+
+	commitOK := true
+
+	for _, op := range args.Ops {
+		key := op.Arg1
+		shard := key2shard(key)
+		gid := kv.config.Shards[shard]
+		servers := kv.config.Groups[gid]
+		if len(servers) == 0 {
+			commitOK = false
+			logToServer(kv.Port, fmt.Sprintf(
+				"tx %s: COMMIT %s %q → FAILED (no group %d)",
+				txID, opTypeName(op.Type), key, gid,
+			))
+			break
+		}
+
+		switch op.Type {
+		case GET:
+			ga := &GetArgs{
+				Key:           key,
+				ClientId:      args.ClientId,
+				RequestNumber: args.RequestNumber,
+				ConfigNumber:  kv.config.Num,
+			}
+			got := false
+			for _, srvName := range servers {
+				srv := kv.make_end(srvName)
+				var gr GetReply
+				if srv.Call("ShardKV.Get", ga, &gr) && (gr.Err == OK || gr.Err == ErrNoKey) {
+					logToServer(kv.Port, fmt.Sprintf(
+						"tx %s: COMMIT GET %q → %q",
+						txID, key, gr.Value,
+					))
+					got = true
+					break
+				}
+			}
+			if !got {
+				commitOK = false
+				logToServer(kv.Port, fmt.Sprintf(
+					"tx %s: COMMIT GET %q → FAILED",
+					txID, key,
+				))
+			}
+
+		case PUT, APPEND:
+			pa := &PutAppendArgs{
+				Key:           key,
+				Value:         op.Arg2,
+				Op:            map[int]string{PUT: "Put", APPEND: "Append"}[op.Type],
+				ClientId:      args.ClientId,
+				RequestNumber: args.RequestNumber,
+				ConfigNumber:  kv.config.Num,
+			}
+			done := false
+			for _, srvName := range servers {
+				srv := kv.make_end(srvName)
+				var pr PutAppendReply
+				if srv.Call("ShardKV.PutAppend", pa, &pr) && pr.Err == OK {
+					logToServer(kv.Port, fmt.Sprintf(
+						"tx %s: COMMIT %s %q → OK",
+						txID, pa.Op, key,
+					))
+					done = true
+					break
+				}
+			}
+			if !done {
+				commitOK = false
+				logToServer(kv.Port, fmt.Sprintf(
+					"tx %s: COMMIT %s %q → FAILED",
+					txID, pa.Op, key,
+				))
+			}
+
+		default:
+			commitOK = false
+			logToServer(kv.Port, fmt.Sprintf(
+				"tx %s: COMMIT UnknownOp(%d) → FAILED",
+				txID, op.Type,
+			))
+		}
+
+		if !commitOK {
+			break
+		}
+	}
+
+	// 10) Set overall reply.Err
+	if commitOK {
+		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase succeeded", txID))
+		reply.Err = OK
+	} else {
+		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase failed, rolling back", txID))
+		reply.Err = "CommitFailed"
+	}
+
+	// 11) Always unlock everything before returning
+	allGroups := make(map[int][]string)
+	allGroups[kv.gid] = localKeys
+	for gid, keys := range remoteKeys {
+		allGroups[gid] = keys
+	}
+	for gid, keys := range allGroups {
+		ua := &UnlockArgs{Keys: keys, TxID: txID}
+		for _, srvName := range kv.config.Groups[gid] {
+			srv := kv.make_end(srvName)
+			var ur UnlockReply
+			if srv.Call("ShardKV.UnlockKeys", ua, &ur) && ur.Err == OK {
+				logToServer(kv.Port, fmt.Sprintf(
+					"tx %s: UNLOCK group %d keys %v",
+					txID, gid, keys))
+				break
+			}
+		}
+	}
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -309,6 +471,45 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) handleOp(op Op) (reply string, isValid bool) {
+
+	switch op.Type {
+	case LOCK_KEYS:
+		// op.Arg1 = key, op.Arg2 = txID
+		key, txID := op.Arg1, op.Arg2
+		kv.lockTableMu.Lock()
+		if owner, held := kv.lockTable[key]; !held || owner == txID {
+			// free or already ours
+			kv.lockTable[key] = txID
+			isValid = true
+		} else {
+			isValid = false
+		}
+		kv.lockTableMu.Unlock()
+		// reply stays empty
+		// record last‐reply for RPC wakeup
+		kv.lastClientCommandReply[op.ClientUuid] = InternalResp{
+			ReqNumber: op.ClientReqNo,
+			Reply:     "",
+			Valid:     isValid,
+		}
+		return "", isValid
+
+	case UNLOCK_KEYS:
+		key, txID := op.Arg1, op.Arg2
+		kv.lockTableMu.Lock()
+		if kv.lockTable[key] == txID {
+			delete(kv.lockTable, key)
+		}
+		kv.lockTableMu.Unlock()
+		isValid = true
+		kv.lastClientCommandReply[op.ClientUuid] = InternalResp{
+			ReqNumber: op.ClientReqNo,
+			Reply:     "",
+			Valid:     true,
+		}
+		return "", true
+	}
+
 	if kv.inMyShard(op.Arg1) {
 		lastClientReply, ok := kv.lastClientCommandReply[op.ClientUuid]
 		if !ok || lastClientReply.ReqNumber < op.ClientReqNo {
@@ -395,10 +596,29 @@ func (kv *ShardKV) handleConfigChange(configChange ConfigChange) bool {
 	}
 }
 
+func opTypeName(t int) string {
+	switch t {
+	case GET:
+		return "GET"
+	case PUT:
+		return "PUT"
+	case APPEND:
+		return "APPEND"
+	case LOCK_KEYS:
+		return "LOCK_KEYS"
+	case UNLOCK_KEYS:
+		return "UNLOCK_KEYS"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", t)
+	}
+}
+
 func (kv *ShardKV) applyHandler() {
 	for kv.killed() == false {
 
 		applyMsg := <-kv.applyCh
+		// formatted := fmt.Sprintf("group %d, server %d, applymsg %v", kv.gid, kv.me, applyMsg)
+		// logToServer(kv.Port, formatted)
 		// log.Printf("group %d, server %d, applymsg %v", kv.gid, kv.me, applyMsg)
 
 		if applyMsg.CommandValid {
@@ -412,6 +632,19 @@ func (kv *ShardKV) applyHandler() {
 				kv.shardLock.Lock()
 
 				reply, isValid := kv.handleOp(op)
+
+				if isValid {
+					logToServer(kv.Port, fmt.Sprintf(
+						"Server %d: applied Op{%s, %q, %q} at index %d (term %d) — SUCCESS",
+						kv.me, opTypeName(op.Type), op.Arg1, op.Arg2,
+						applyMsg.CommandIndex, applyMsg.CommandTerm,
+					))
+				} else {
+					logToServer(kv.Port, fmt.Sprintf(
+						"Server %d: Op{%s, %q, %q} at index %d (term %d) was a duplicate, no-op",
+						kv.me, opTypeName(op.Type), op.Arg1, op.Arg2, applyMsg.CommandIndex, applyMsg.CommandTerm,
+					))
+				}
 
 				kv.shardLock.Unlock()
 
@@ -490,6 +723,11 @@ func (kv *ShardKV) loadSnapShot(snapShot []byte) {
 	r := bytes.NewBuffer(snapShot)
 	d := labgob.NewDecoder(r)
 
+	kv.lockTable = make(map[string]string)
+	if d.Decode(&kv.lockTable) != nil {
+		log.Fatal("shardkv: failed to decode lockTable")
+	}
+
 	kv.config = shardctrler.Config{}
 	kv.lastConfig = shardctrler.Config{}
 	kv.lastClientCommandReply = make(map[int64]InternalResp)
@@ -537,6 +775,9 @@ func (kv *ShardKV) stateCompactor() {
 			e.Encode(configCopy)
 			e.Encode(oldConfigCopy)
 			e.Encode(isUpdatingCopy)
+			kv.lockTableMu.Lock()
+			e.Encode(kv.lockTable)
+			kv.lockTableMu.Unlock()
 			snapshot := w.Bytes()
 			kv.rf.Snapshot(snapshotIndex, snapshot)
 		} else {
@@ -637,7 +878,7 @@ func (kv *ShardKV) configUpdater() {
 			}()
 
 		}
-		time.Sleep(time.Millisecond * 200)
+		time.Sleep(time.Millisecond * 100)
 	}
 }
 
@@ -891,28 +1132,116 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 }
 
 func (kv *ShardKV) LockKeys(args *LockArgs, reply *LockReply) {
-	kv.lockTableMu.Lock()
-	defer kv.lockTableMu.Unlock()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	var (
+		lockedKeys []string
+		failedKeys []string
+	)
 	for _, key := range args.Keys {
-		if currentTx, ok := kv.lockTable[key]; ok && currentTx != "" && currentTx != args.TxID {
-			reply.Err = KeyLocked
-			return
+		// 1) Build a Raft log entry just for this key
+		op := Op{
+			Type:        LOCK_KEYS,
+			Arg1:        key,
+			TxID:        args.TxID,
+			ClientUuid:  args.ClientId,
+			ClientReqNo: args.RequestNumber,
+		}
+
+		// 2) Submit it to Raft
+		kv.mu.Lock()
+		index, term, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			kv.mu.Unlock()
+			// not the leader → immediate failure for this key
+			failedKeys = append(failedKeys, key)
+			continue
+		}
+		// register a channel to catch the apply callback
+		ch := make(chan *InternalResp, 1)
+		kv.ReplyWaitChan[termIndexToString(term, index)] = ch
+		kv.mu.Unlock()
+
+		// 3) Wait for that entry to be applied
+		resp := <-ch
+		if resp.Valid {
+			lockedKeys = append(lockedKeys, key)
+		} else {
+			failedKeys = append(failedKeys, key)
 		}
 	}
-	for _, key := range args.Keys {
-		kv.lockTable[key] = args.TxID
+
+	if len(failedKeys) == 0 {
+		logToServer(kv.Port, fmt.Sprintf(
+			"LockKeys[%s]: SUCCESS. locked %v on server %d",
+			args.TxID, lockedKeys, kv.me,
+		))
+		reply.Err = OK
+	} else {
+		logToServer(kv.Port, fmt.Sprintf(
+			"LockKeys[%s]: FAILED. locked %v; failed %v on server %d",
+			args.TxID, lockedKeys, failedKeys, kv.me,
+		))
+		reply.Err = KeyLocked
 	}
-	reply.Err = OK
 }
 
 func (kv *ShardKV) UnlockKeys(args *UnlockArgs, reply *UnlockReply) {
-	kv.lockTableMu.Lock()
-	defer kv.lockTableMu.Unlock()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	var (
+		unlockedKeys []string
+		failedKeys   []string
+	)
 
 	for _, key := range args.Keys {
-		if currentTx, ok := kv.lockTable[key]; ok && currentTx == args.TxID {
-			delete(kv.lockTable, key)
+		op := Op{
+			Type:        UNLOCK_KEYS,
+			Arg1:        key,
+			TxID:        args.TxID,
+			ClientUuid:  args.ClientId,
+			ClientReqNo: args.RequestNumber,
+		}
+
+		// 2) Send it through Raft
+		kv.mu.Lock()
+		index, term, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			kv.mu.Unlock()
+			failedKeys = append(failedKeys, key)
+			continue
+		}
+		ch := make(chan *InternalResp, 1)
+		kv.ReplyWaitChan[termIndexToString(term, index)] = ch
+		kv.mu.Unlock()
+
+		// 3) Wait for commit+apply
+		resp := <-ch
+		if resp.Valid {
+			unlockedKeys = append(unlockedKeys, key)
+		} else {
+			failedKeys = append(failedKeys, key)
 		}
 	}
-	reply.Err = OK
+
+	// 4) Log & reply
+	if len(failedKeys) == 0 {
+		logToServer(kv.Port, fmt.Sprintf(
+			"UnlockKeys[%s]: SUCCESS – unlocked %v on server %d",
+			args.TxID, unlockedKeys, kv.me,
+		))
+		reply.Err = OK
+	} else {
+		logToServer(kv.Port, fmt.Sprintf(
+			"UnlockKeys[%s]: PARTIAL FAILURE – unlocked %v; failed %v on server %d",
+			args.TxID, unlockedKeys, failedKeys, kv.me,
+		))
+		reply.Err = KeyLocked // or a dedicated ErrUnlockFailed
+	}
 }

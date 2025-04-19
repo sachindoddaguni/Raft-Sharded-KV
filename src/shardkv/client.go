@@ -9,7 +9,6 @@ package shardkv
 //
 
 import (
-	"log"
 	"sync/atomic"
 	"time"
 
@@ -57,7 +56,7 @@ func (ck *Clerk) Get(key string) string {
 		RequestNumber: atomic.AddInt32(&ck.reqNumber, 1),
 		ConfigNumber:  ck.config.Num,
 	}
-	log.Printf("clerk %d, req no: %d, get %v", ck.uuid, args.RequestNumber, key)
+	// log.Printf("clerk %d, req no: %d, get %v", ck.uuid, args.RequestNumber, key)
 
 	for {
 		shard := key2shard(key)
@@ -69,8 +68,8 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					log.Printf("clerk %d, req no: %d,[Got reply] key %v = %v (gid: %d)",
-						ck.uuid, args.RequestNumber, key, reply.Value, gid)
+					// log.Printf("clerk %d, req no: %d,[Got reply] key %v = %v (gid: %d)",
+					// ck.uuid, args.RequestNumber, key, reply.Value, gid)
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
@@ -103,7 +102,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 
-	log.Printf("clerk %d, req no: %d, %v %v, %v", ck.uuid, args.RequestNumber, op, key, value)
+	// log.Printf("clerk %d, req no: %d, %v %v, %v", ck.uuid, args.RequestNumber, op, key, value)
 
 	for {
 		shard := key2shard(key)
@@ -114,8 +113,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
-					log.Printf("clerk %d, req no: %d,[Got reply] %v %v, %v done(gid %d)",
-						ck.uuid, args.RequestNumber, op, key, value, gid)
+					// log.Printf("clerk %d, req no: %d,[Got reply] %v %v, %v done(gid %d)",
+					// ck.uuid, args.RequestNumber, op, key, value, gid)
 
 					return
 				}

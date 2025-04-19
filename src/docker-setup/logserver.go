@@ -16,7 +16,7 @@ func logHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Print log message to standard output.
-		fmt.Printf("LOG: %s\n", body)
+		fmt.Printf("LOG: \033[31m%s\033[31m\n", body)
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "logged")
 	} else {

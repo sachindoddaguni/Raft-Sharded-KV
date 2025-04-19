@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+	"log"
 	"sync/atomic"
 )
 
@@ -21,7 +22,8 @@ func (ck *Clerk) ProcessTransaction(ops []Op) error {
 	// We'll choose one of the groups randomly.
 	// ideally we should pick the one liek spanner does
 	var serverList []string
-	for _, servers := range ck.config.Groups {
+	for gid, servers := range ck.config.Groups {
+		log.Printf("selected group %d for being the coordinator", gid)
 		serverList = servers
 		break // or choose randomly from all groups, here we simply take the first group found
 	}

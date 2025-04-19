@@ -154,7 +154,7 @@ func (rf *Raft) readPersist() {
 	rf.snapShot = rf.persister.ReadSnapshot()
 	if data == nil || len(data) < 1 {
 		rf.snapShot = nil
-		log.Printf("Restoring from empty state")
+		// log.Printf("Restoring from empty state")
 		return
 	}
 
@@ -336,9 +336,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//defer rf.PrintState()
-	formatted := fmt.Sprintf("Server %d received vote request: %v", rf.me, args)
+	// formatted := fmt.Sprintf("Server %d received vote request: %v", rf.me, args)
 
-	logToServer(rf.Port, formatted)
+	// logToServer(rf.Port, formatted)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -346,8 +346,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 
-		formatted = fmt.Sprintf("Server %d voted no for %d in term %d due to my term > his, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
-		logToServer(rf.Port, formatted)
+		// formatted = fmt.Sprintf("Server %d voted no for %d in term %d due to my term > his, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
+		// logToServer(rf.Port, formatted)
 		return
 	}
 	if args.Term > rf.currentTerm || (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
@@ -366,8 +366,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.currentTerm = args.Term
 				rf.convertToFollower(-1)
 			}
-			formatted = fmt.Sprintf("Server %d voted no for %d in term %d due to me more updated than him, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
-			logToServer(rf.Port, formatted)
+			// formatted = fmt.Sprintf("Server %d voted no for %d in term %d due to me more updated than him, reply: %v", rf.me, args.CandidateId, rf.currentTerm, reply)
+			// logToServer(rf.Port, formatted)
 			return
 		}
 		// Candidate is atleast as uptodate as me
@@ -377,8 +377,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if newVote {
 			rf.convertToFollower(args.CandidateId)
 		}
-		formatted = fmt.Sprintf("Server %d voted for %d in term %d, reply: %v", rf.me, rf.votedFor, rf.currentTerm, reply)
-		logToServer(rf.Port, formatted)
+		// formatted = fmt.Sprintf("Server %d voted for %d in term %d, reply: %v", rf.me, rf.votedFor, rf.currentTerm, reply)
+		// logToServer(rf.Port, formatted)
 	} else {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -413,7 +413,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(voteChan chan bool, server int, args *RequestVoteArgs) bool {
-	log.Printf("Server %d: Sending voteRequest %v to server %d", rf.me, *args, server)
+	// log.Printf("Server %d: Sending voteRequest %v to server %d", rf.me, *args, server)
 	reply := RequestVoteReply{}
 
 	//atomic.AddInt32(&rf.rpcCount, 1)
@@ -455,6 +455,8 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesRequest, reply *AppendEntriesReply) {
 
 	//defer rf.PrintState()
+	// formatted := fmt.Sprintf("server %d recieved appendEntries request: %v, curr Log: %v, baseIdx: %d", rf.me, *args, rf.Log, rf.baseIndex)
+	// logToServer(rf.Port, formatted)
 	//// log.Printf("server %d recieved appendEntries request: %v, curr Log: %v, baseIdx: %d", rf.me, *args, rf.Log, rf.baseIndex)
 
 	rf.mu.Lock()
@@ -558,7 +560,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesRequest, reply *AppendEntriesRe
 	for rf.LastApplied < rf.commitIndex {
 		idx := rf.LastApplied + 1 - rf.baseIndex
 		entry := rf.Log[idx]
-		//// log.Printf("server %d: applied entry: %v", rf.me, entry)
 		userMsg := ApplyMsg{
 			CommandValid:  true,
 			Command:       entry.Command,
@@ -657,8 +658,6 @@ func (rf *Raft) committer() {
 				SnapshotTerm:  0,
 				SnapshotIndex: 0,
 			}
-			formatted := fmt.Sprintf("server %d: applied entry: %v", rf.me, entry)
-			logToServer(rf.Port, formatted)
 			rf.LastApplied++
 		}
 
@@ -883,7 +882,7 @@ func (rf *Raft) convertToLeader() {
 			rf.leaderPromoteNotifyChan[i] <- rf.currentTerm
 		}
 	}
-	formatted := fmt.Sprintf("raft: leader elected %d", rf.me)
+	formatted := fmt.Sprintf("I am elected as the leader for the term %d", rf.currentTerm)
 	logToServer(rf.Port, formatted)
 	//rf.PrintState()
 }
@@ -898,7 +897,7 @@ func (rf *Raft) convertToFollower(votedFor int) {
 
 	rf.currentState = FOLLOWER
 	rf.persist(false)
-	formatted := fmt.Sprintf("Server %d converted to follower", rf.me)
+	formatted := fmt.Sprintf("I am follower for the term %d", rf.currentTerm)
 	logToServer(rf.Port, formatted)
 }
 
@@ -1004,7 +1003,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rand.Seed(time.Now().UnixNano())
 
-	rf.electionTimeout = time.Millisecond * 300
+	rf.electionTimeout = time.Millisecond * 3000
 	rf.electionTimer = time.NewTicker(GetRandomTimeout(rf.electionTimeout))
 	rf.heartBeatTimeout = 100 * time.Millisecond
 

@@ -1,10 +1,11 @@
 package kvraft
 
 import (
-	"6.824/labrpc"
 	"log"
 	"sync/atomic"
 	"time"
+
+	"6.824/labrpc"
 )
 
 type Clerk struct {
@@ -47,7 +48,7 @@ func (ck *Clerk) Get(key string) string {
 		RequestNumber: reqNo,
 	}
 
-	log.Printf("Clerk %v, reqno %v: sending req get: %v", req.ClientId, req.RequestNumber, req.Key)
+	// log.Printf("Clerk %v, reqno %v: sending req get: %v", req.ClientId, req.RequestNumber, req.Key)
 
 	doneChan := make(chan GetReply, 20)
 	sendReq := func(to int) {
@@ -67,7 +68,7 @@ func (ck *Clerk) Get(key string) string {
 				ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
 				go sendReq(ck.lastLeader)
 			} else {
-				log.Printf("Clerk %v, reqno %v: [got reply] got: %v = %v", req.ClientId, req.RequestNumber, req.Key, getReply.Value)
+				// log.Printf("Clerk %v, reqno %v: [got reply] got: %v = %v", req.ClientId, req.RequestNumber, req.Key, getReply.Value)
 				return getReply.Value
 			}
 
@@ -79,7 +80,6 @@ func (ck *Clerk) Get(key string) string {
 	}
 }
 
-//
 // shared by Put and Append.
 //
 // you can send an RPC with code like this:
@@ -88,7 +88,6 @@ func (ck *Clerk) Get(key string) string {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	reqNo := atomic.AddInt32(&ck.reqNumber, 1)
 	req := PutAppendArgs{
@@ -98,7 +97,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ClientId:      ck.uuid,
 		RequestNumber: reqNo,
 	}
-	log.Printf("Clerk %v, reqno %v: sending req: %v, %v, %v", req.ClientId, req.RequestNumber, op, key, value)
+	// log.Printf("Clerk %v, reqno %v: sending req: %v, %v, %v", req.ClientId, req.RequestNumber, op, key, value)
 	doneChan := make(chan PutAppendReply, 20)
 	sendReq := func(to int) {
 		//log.Printf("clerk %v, reqno %v, sending req to %d", req.ClientId, req.RequestNumber, to)

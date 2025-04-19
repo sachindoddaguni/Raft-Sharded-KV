@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
@@ -36,6 +37,7 @@ const (
 	ErrServerNotUpdated = "ErrServerNotUpdated"
 	ErrNoGroupAvailable = "ErrNoGroupAvailable"
 	KeyLocked           = "KeyLocked"
+	TransactionFailed   = "TransactionFailed"
 )
 
 type Err string
@@ -204,6 +206,45 @@ func logToServer(port string, message string) error {
 	// Check the response status code.
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected response status: %v", resp.Status)
+	}
+
+	return nil
+}
+
+func deleteContainersWithPrefix() error {
+	prefixes := []string{"ctrler", "server"}
+	// Create a Docker client from environment.
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("failed to create docker client: %v", err)
+	}
+	ctx := context.Background()
+
+	// List all containers (including stopped containers).
+	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("failed to list containers: %v", err)
+	}
+
+	for _, container := range containers {
+		// Each container can have multiple names.
+		for _, name := range container.Names {
+			// Docker container names are usually prefixed with '/'
+			trimmedName := strings.TrimPrefix(name, "/")
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(trimmedName, prefix) {
+					log.Printf("Deleting container: %s (ID: %s)", trimmedName, container.ID)
+					// Remove the container. Force removal (Force: true) to stop it if it's running.
+					err := cli.ContainerRemove(ctx, container.ID, types.ContainerRemoveOptions{
+						Force: true,
+					})
+					if err != nil {
+						log.Printf("Error removing container %s: %v", trimmedName, err)
+					}
+					break // container name matches one prefix, move on to next container
+				}
+			}
+		}
 	}
 
 	return nil
