@@ -303,7 +303,11 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 
 	// ... now proceed to 2PC prepare / commit ...
 
-	logToServer(kv.Port, "Starting COMMIT phase for the transaction")
+	logToServer(kv.Port, fmt.Sprintf("tx %s: Starting COMMIT phase for the transaction", txID))
+	if args.Delay > 0 {
+		logToServer(kv.Port, fmt.Sprintf("Sleeping with delay %d secs", args.Delay))
+		time.Sleep(time.Duration(args.Delay) * time.Second)
+	}
 
 	commitOK := true
 
@@ -475,7 +479,7 @@ func (kv *ShardKV) handleOp(op Op) (reply string, isValid bool) {
 	switch op.Type {
 	case LOCK_KEYS:
 		// op.Arg1 = key, op.Arg2 = txID
-		key, txID := op.Arg1, op.Arg2
+		key, txID := op.Arg1, op.TxID
 		kv.lockTableMu.Lock()
 		if owner, held := kv.lockTable[key]; !held || owner == txID {
 			// free or already ours
@@ -638,11 +642,6 @@ func (kv *ShardKV) applyHandler() {
 						"Server %d: applied Op{%s, %q, %q} at index %d (term %d) — SUCCESS",
 						kv.me, opTypeName(op.Type), op.Arg1, op.Arg2,
 						applyMsg.CommandIndex, applyMsg.CommandTerm,
-					))
-				} else {
-					logToServer(kv.Port, fmt.Sprintf(
-						"Server %d: Op{%s, %q, %q} at index %d (term %d) was a duplicate, no-op",
-						kv.me, opTypeName(op.Type), op.Arg1, op.Arg2, applyMsg.CommandIndex, applyMsg.CommandTerm,
 					))
 				}
 
@@ -1143,6 +1142,7 @@ func (kv *ShardKV) LockKeys(args *LockArgs, reply *LockReply) {
 	)
 	for _, key := range args.Keys {
 		// 1) Build a Raft log entry just for this key
+		args.RequestNumber += 1
 		op := Op{
 			Type:        LOCK_KEYS,
 			Arg1:        key,
@@ -1201,6 +1201,7 @@ func (kv *ShardKV) UnlockKeys(args *UnlockArgs, reply *UnlockReply) {
 	)
 
 	for _, key := range args.Keys {
+		args.RequestNumber += 1
 		op := Op{
 			Type:        UNLOCK_KEYS,
 			Arg1:        key,
@@ -1211,6 +1212,9 @@ func (kv *ShardKV) UnlockKeys(args *UnlockArgs, reply *UnlockReply) {
 
 		// 2) Send it through Raft
 		kv.mu.Lock()
+		if _, exists := kv.lockTable[key]; !exists {
+			continue
+		}
 		index, term, isLeader := kv.rf.Start(op)
 		if !isLeader {
 			kv.mu.Unlock()

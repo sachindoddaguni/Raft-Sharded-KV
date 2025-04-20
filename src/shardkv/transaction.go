@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+	"errors"
 	"log"
 	"sync/atomic"
 )
@@ -9,12 +10,17 @@ type TxReply struct {
 	Err string
 }
 
-func (ck *Clerk) ProcessTransaction(ops []Op) error {
-	reqNo := atomic.AddInt32(&ck.reqNumber, 1)
+func (ck *Clerk) ProcessTransaction(ops []Op, delayS ...int) error {
+	reqNo := atomic.AddInt32(&ck.reqNumber, 100)
+	d := 0
+	if len(delayS) > 0 {
+		d = delayS[0]
+	}
 	args := &TxOp{
 		Ops:           ops,
 		ClientId:      ck.uuid,
 		RequestNumber: reqNo,
+		Delay:         d,
 	}
 
 	// For now, choose a random replica group from the configuration.
@@ -37,6 +43,8 @@ func (ck *Clerk) ProcessTransaction(ops []Op) error {
 		ok := srv.Call("ShardKV.ProcessTransaction", args, &reply)
 		if ok && reply.Err == OK {
 			return nil
+		} else if reply.Err == "LockFailed" {
+			return errors.New("LockFailed")
 		}
 	}
 	return nil

@@ -943,10 +943,11 @@ func TestChallenge2Partial(t *testing.T) {
 func TestTransactions(t *testing.T) {
 	deleteContainersWithPrefix()
 	fmt.Printf("Test: transactions ...\n")
-	cfg := make_config(t, 3, false, -1)
-	cfg.join(0)
-	cfg.join(1)
-	cfg.join(2)
+	ng := 2
+	cfg := make_config(t, 3, false, -1, ng)
+	for g := range ng {
+		cfg.join(g)
+	}
 	time.Sleep(5 * time.Second)
 	ck := cfg.makeClient()
 	defer cfg.cleanup()
@@ -973,4 +974,38 @@ func TestTransactions(t *testing.T) {
 	}
 	ck.ProcessTransaction([]Op{op1, op2, op3})
 	time.Sleep(5 * time.Second)
+}
+
+func TestTransactionLockConflict(t *testing.T) {
+	deleteContainersWithPrefix()
+	fmt.Printf("Test: transaction lock conflict …\n")
+	ng := 2
+	cfg := make_config(t, 3, false, -1, ng)
+	for g := range ng {
+		cfg.join(g)
+	}
+	time.Sleep(5 * time.Second)
+	ck1 := cfg.makeClient()
+	ck2 := cfg.makeClient()
+	defer cfg.cleanup()
+	go func() {
+		tx := []Op{{Type: PUT, Arg1: "x", Arg2: "100", ClientUuid: 1, ClientReqNo: 1}}
+		ck1.ProcessTransaction(tx, 1)
+	}()
+	// let ck1 grab the X lock first
+	time.Sleep(50 * time.Millisecond)
+
+	tx2 := []Op{{Type: PUT, Arg1: "x", Arg2: "200", ClientUuid: 2, ClientReqNo: 1}}
+	err := ck2.ProcessTransaction(tx2)
+	if err != nil && err.Error() != "LockFailed" {
+		t.Fatalf("expected second transaction to fail with LockFailed, got %v", err)
+	}
+	fmt.Println("  … saw expected LockFailed")
+
+	time.Sleep(10 * time.Second)
+
+	v := ck1.Get("x")
+	if v != "100" {
+		t.Fatalf("expected x == \"100\" after transaction, got %q", v)
+	}
 }

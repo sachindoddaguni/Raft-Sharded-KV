@@ -53,7 +53,7 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{
 		Key:           key,
 		ClientId:      ck.uuid,
-		RequestNumber: atomic.AddInt32(&ck.reqNumber, 1),
+		RequestNumber: atomic.AddInt32(&ck.reqNumber, 100),
 		ConfigNumber:  ck.config.Num,
 	}
 	// log.Printf("clerk %d, req no: %d, get %v", ck.uuid, args.RequestNumber, key)

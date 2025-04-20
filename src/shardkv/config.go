@@ -345,7 +345,7 @@ func (cfg *config) leavem(gis []int) {
 
 var ncpu_once sync.Once
 
-func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config {
+func make_config(t *testing.T, n int, unreliable bool, maxraftstate int, ng ...int) *config {
 	ncpu_once.Do(func() {
 		if runtime.NumCPU() < 2 {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
@@ -368,6 +368,9 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 	cfg.mck = cfg.shardclerk()
 
 	cfg.ngroups = 3
+	if len(ng) > 0 {
+		cfg.ngroups = ng[0]
+	}
 	cfg.groups = make([]*group, cfg.ngroups)
 	cfg.n = n
 	for gi := 0; gi < cfg.ngroups; gi++ {

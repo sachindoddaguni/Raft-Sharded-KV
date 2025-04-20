@@ -61,6 +61,7 @@ type TxOp struct {
 	Ops           []Op
 	ClientId      int64
 	RequestNumber int32
+	Delay         int
 }
 
 type GetArgs struct {
