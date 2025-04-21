@@ -23,6 +23,9 @@ const (
 	APPEND      = 2
 	LOCK_KEYS   = 3
 	UNLOCK_KEYS = 4
+	TX_PREPARE  = 5
+	TX_COMMIT   = 6
+	TX_ABORT    = 7
 )
 
 type Op struct {
@@ -73,6 +76,8 @@ type ShardKV struct {
 
 	ContainerId string
 	Port        string
+
+	pendingTxs map[string][]Op
 }
 
 type InternalResp struct {
@@ -176,6 +181,28 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	}
 
 	logToServer(kv.Port, "Starting prepare phase for the transaction")
+
+	var prepareBuf bytes.Buffer
+	labgob.NewEncoder(&prepareBuf).Encode(args.Ops)
+
+	prepareOp := Op{
+		Type:        TX_PREPARE,
+		TxID:        txID,
+		Arg2:        prepareBuf.String(),
+		ClientUuid:  args.ClientId,
+		ClientReqNo: args.RequestNumber,
+	}
+	idx, term, _ := kv.rf.Start(prepareOp)
+	ch := make(chan *InternalResp, 1)
+	kv.mu.Lock()
+	kv.ReplyWaitChan[termIndexToString(term, idx)] = ch
+	kv.mu.Unlock()
+
+	resp := <-ch
+	if !resp.Valid || resp.Term != term {
+		reply.Err = TransactionFailed
+		return
+	}
 
 	// 4) Log the distribution
 	var dist strings.Builder
@@ -400,9 +427,20 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	// 10) Set overall reply.Err
 	if commitOK {
 		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase succeeded", txID))
-		reply.Err = OK
 	} else {
 		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase failed, rolling back", txID))
+		commitOp := Op{
+			Type:        TX_ABORT,
+			TxID:        txID,
+			ClientUuid:  args.ClientId,
+			ClientReqNo: args.RequestNumber,
+		}
+		idx, term, _ := kv.rf.Start(commitOp)
+		ch := make(chan *InternalResp, 1)
+		kv.mu.Lock()
+		kv.ReplyWaitChan[termIndexToString(term, idx)] = ch
+		kv.mu.Unlock()
+		<-ch
 		reply.Err = "CommitFailed"
 	}
 
@@ -425,6 +463,19 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 			}
 		}
 	}
+	commitOp := Op{
+		Type:        TX_COMMIT,
+		TxID:        txID,
+		ClientUuid:  args.ClientId,
+		ClientReqNo: args.RequestNumber,
+	}
+	idx, term, _ = kv.rf.Start(commitOp)
+	ch = make(chan *InternalResp, 1)
+	kv.mu.Lock()
+	kv.ReplyWaitChan[termIndexToString(term, idx)] = ch
+	kv.mu.Unlock()
+	<-ch
+	reply.Err = OK
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -451,6 +502,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Arg2:        args.Value,
 		ClientUuid:  args.ClientId,
 		ClientReqNo: args.RequestNumber,
+		TxID:        args.TxID,
 	}
 
 	kv.mu.Lock()
@@ -474,9 +526,81 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
+func (kv *ShardKV) abortAllPending() {
+	// 1) Snapshot the pendingTxs under lock
+	kv.mu.Lock()
+	logToServer(kv.Port, fmt.Sprintf("Aborting %d pending transactions...", len(kv.pendingTxs)))
+	pending := make(map[string][]Op, len(kv.pendingTxs))
+	for txID, ops := range kv.pendingTxs {
+		pending[txID] = ops
+	}
+	kv.mu.Unlock()
+
+	// 2) For each tx, unlock via RPC per group
+	for txID, ops := range pending {
+		// group keys by gid
+		keysByGid := make(map[int][]string)
+		for _, op := range ops {
+			key := op.Arg1
+			shard := key2shard(key)
+			gid := kv.config.Shards[shard]
+			keysByGid[gid] = append(keysByGid[gid], key)
+		}
+
+		// issue UnlockKeys RPC to each group
+		for gid, keys := range keysByGid {
+			args := &UnlockArgs{Keys: keys, TxID: txID}
+			for _, srvName := range kv.config.Groups[gid] {
+				srv := kv.make_end(srvName)
+				var ur UnlockReply
+				if srv.Call("ShardKV.UnlockKeys", args, &ur) && ur.Err == OK {
+					break
+				}
+			}
+		}
+
+		// 3) Raft‑persist the abort so applyHandler will drop pendingTxs[txID]
+		abortOp := Op{Type: TX_ABORT, TxID: txID}
+		idx, term, isLeader := kv.rf.Start(abortOp)
+		if !isLeader {
+			continue
+		}
+		ch := make(chan *InternalResp, 1)
+		kv.mu.Lock()
+		kv.ReplyWaitChan[termIndexToString(term, idx)] = ch
+		kv.mu.Unlock()
+		<-ch
+	}
+}
+
+func (kv *ShardKV) leaderMonitor() {
+	wasLeader := false
+	for !kv.killed() {
+		_, isLeader := kv.rf.GetState()
+		if isLeader && !wasLeader {
+			// on becoming leader, abort every pending tx
+			kv.abortAllPending()
+		}
+		wasLeader = isLeader
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func (kv *ShardKV) handleOp(op Op) (reply string, isValid bool) {
 
 	switch op.Type {
+	case TX_PREPARE:
+		// decode and buffer every sub‑Op
+		var ops []Op
+		buf := bytes.NewBufferString(op.Arg2)
+		labgob.NewDecoder(buf).Decode(&ops)
+		kv.pendingTxs[op.TxID] = ops
+		return "", true
+
+	case TX_COMMIT, TX_ABORT:
+		delete(kv.pendingTxs, op.TxID)
+		return "", true
+
 	case LOCK_KEYS:
 		// op.Arg1 = key, op.Arg2 = txID
 		key, txID := op.Arg1, op.TxID
@@ -499,7 +623,7 @@ func (kv *ShardKV) handleOp(op Op) (reply string, isValid bool) {
 		return "", isValid
 
 	case UNLOCK_KEYS:
-		key, txID := op.Arg1, op.Arg2
+		key, txID := op.Arg1, op.TxID
 		kv.lockTableMu.Lock()
 		if kv.lockTable[key] == txID {
 			delete(kv.lockTable, key)
@@ -515,41 +639,42 @@ func (kv *ShardKV) handleOp(op Op) (reply string, isValid bool) {
 	}
 
 	if kv.inMyShard(op.Arg1) {
-		lastClientReply, ok := kv.lastClientCommandReply[op.ClientUuid]
-		if !ok || lastClientReply.ReqNumber < op.ClientReqNo {
-			// apply
-			if op.Type == GET {
-				val, ok := kv.kv[op.Arg1]
-				if !ok {
-					val = ""
-				}
-				reply = val
-			} else if op.Type == PUT {
-				kv.kv[op.Arg1] = op.Arg2
-			} else {
-				oldVal, ok := kv.kv[op.Arg1]
-				if !ok {
-					oldVal = ""
-				}
-				kv.kv[op.Arg1] = oldVal + op.Arg2
+		// lastClientReply, ok := kv.lastClientCommandReply[op.ClientUuid]
+		// if !ok || lastClientReply.ReqNumber < op.ClientReqNo {
+		// apply
+		if op.Type == GET {
+			val, ok := kv.kv[op.Arg1]
+			if !ok {
+				val = ""
 			}
-			isValid = true
-			kv.lastClientCommandReply[op.ClientUuid] = InternalResp{
-				ReqNumber: op.ClientReqNo,
-				Reply:     reply,
-				Valid:     isValid,
-			}
+			reply = val
+		} else if op.Type == PUT {
+			logToServer(kv.Port, fmt.Sprintf("added key %s with value %s", op.Arg1, op.Arg2))
+			kv.kv[op.Arg1] = op.Arg2
 		} else {
-			// already applied
-			if op.ClientReqNo == lastClientReply.ReqNumber {
-				// still have reply
-				reply = lastClientReply.Reply
-				isValid = true
-			} else {
-				// old
-				isValid = false
+			oldVal, ok := kv.kv[op.Arg1]
+			if !ok {
+				oldVal = ""
 			}
+			kv.kv[op.Arg1] = oldVal + op.Arg2
 		}
+		isValid = true
+		kv.lastClientCommandReply[op.ClientUuid] = InternalResp{
+			ReqNumber: op.ClientReqNo,
+			Reply:     reply,
+			Valid:     isValid,
+		}
+		// } else {
+		// 	// already applied
+		// 	if op.ClientReqNo == lastClientReply.ReqNumber {
+		// 		// still have reply
+		// 		reply = lastClientReply.Reply
+		// 		isValid = true
+		// 	} else {
+		// 		// old
+		// 		isValid = false
+		// 	}
+		// }
 	} else {
 		isValid = false
 	}
@@ -612,6 +737,12 @@ func opTypeName(t int) string {
 		return "LOCK_KEYS"
 	case UNLOCK_KEYS:
 		return "UNLOCK_KEYS"
+	case TX_PREPARE:
+		return "TX_PREPARE"
+	case TX_ABORT:
+		return "TX_ABORT"
+	case TX_COMMIT:
+		return "TX_COMMIT"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}
@@ -706,6 +837,7 @@ func (kv *ShardKV) inMyShard(key string) bool {
 // turn off debug output from this instance.
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
+	killContainer(kv.ContainerId, "SIGKILL")
 	atomic.StoreInt32(&kv.dead, 1)
 }
 
@@ -1057,6 +1189,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.gid = gid
 	kv.ctrlers = ctrlers
 	kv.dead = 0
+	kv.pendingTxs = make(map[string][]Op)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 
@@ -1126,6 +1259,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.applyHandler()
 	go kv.stateCompactor()
 	go kv.configUpdater()
+	go kv.leaderMonitor()
 
 	return kv
 }

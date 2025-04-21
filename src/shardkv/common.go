@@ -51,6 +51,7 @@ type PutAppendArgs struct {
 	ClientId      int64
 	RequestNumber int32
 	ConfigNumber  int
+	TxID          string
 }
 
 type PutAppendReply struct {
@@ -246,6 +247,22 @@ func deleteContainersWithPrefix() error {
 				}
 			}
 		}
+	}
+
+	return nil
+}
+
+func killContainer(containerID string, signal string) error {
+	// 1. Initialize a client from environment (DOCKER_HOST, etc.)
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("unable to create Docker client: %w", err)
+	}
+
+	// 2. Send the signal to the container
+	//    signal can be "SIGKILL", "SIGTERM", "SIGINT", or a numeric string like "9"
+	if err := cli.ContainerKill(context.Background(), containerID, signal); err != nil {
+		return fmt.Errorf("failed to kill container %q: %w", containerID, err)
 	}
 
 	return nil
