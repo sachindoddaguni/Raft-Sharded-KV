@@ -150,7 +150,7 @@ func logTransaction(kvPort string, txID string, ops []Op) {
 	b.WriteString("========================\n")
 
 	// send it off
-	logToServer(kvPort, b.String())
+	logToServer(kvPort, b.String(), "yellow")
 }
 
 func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
@@ -163,7 +163,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 
 	// 2) Build txID
 	txID := strconv.FormatInt(args.ClientId, 10) + "-" + strconv.Itoa(int(args.RequestNumber))
-	logToServer(kv.Port, fmt.Sprintf("tx %s: I am the coordinator on group %d", txID, kv.gid))
+	logToServer(kv.Port, fmt.Sprintf("tx %s: I am the coordinator on group %d", txID, kv.gid), "yellow")
 	logTransaction(kv.Port, txID, args.Ops)
 
 	// 3) Partition keys into local vs remote
@@ -180,7 +180,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 		}
 	}
 
-	logToServer(kv.Port, "Starting prepare phase for the transaction")
+	logToServer(kv.Port, "Starting prepare phase for the transaction", "red")
 
 	var prepareBuf bytes.Buffer
 	labgob.NewEncoder(&prepareBuf).Encode(args.Ops)
@@ -215,7 +215,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	for _, gid := range gids {
 		dist.WriteString(fmt.Sprintf("\n  remote group %d keys: %v", gid, remoteKeys[gid]))
 	}
-	logToServer(kv.Port, dist.String())
+	logToServer(kv.Port, dist.String(), "red")
 
 	// 5) Lock local keys via RPC to ourselves
 	lockedLocal := make([]string, 0, len(localKeys))
@@ -258,11 +258,11 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 		logToServer(kv.Port, fmt.Sprintf(
 			"tx %s: FAILED to lock local keys. successes=%v, conflicts=%v",
 			txID, lockedLocal, conflictsLocal,
-		))
+		), "red")
 		reply.Err = "LockFailed"
 		return
 	}
-	logToServer(kv.Port, fmt.Sprintf("tx %s: successfully locked local keys %v", txID, lockedLocal))
+	logToServer(kv.Port, fmt.Sprintf("tx %s: successfully locked local keys %v", txID, lockedLocal), "red")
 
 	// 6) Lock remote keys
 	remoteOK := true
@@ -282,7 +282,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 				lockedRemote[gid] = keys
 				logToServer(kv.Port, fmt.Sprintf(
 					"tx %s: locked remote keys %v on group %d",
-					txID, keys, gid))
+					txID, keys, gid), "red")
 				break
 			}
 		}
@@ -291,7 +291,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 			failedRemote[gid] = keys
 			logToServer(kv.Port, fmt.Sprintf(
 				"tx %s: FAILED to lock remote keys %v on group %d",
-				txID, keys, gid))
+				txID, keys, gid), "red")
 			break
 		}
 	}
@@ -326,13 +326,13 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	logToServer(kv.Port, fmt.Sprintf(
 		"tx %s: all keys locked successfully: local=%v remote=%v",
 		txID, lockedLocal, lockedRemote,
-	))
+	), "red")
 
 	// ... now proceed to 2PC prepare / commit ...
 
-	logToServer(kv.Port, fmt.Sprintf("tx %s: Starting COMMIT phase for the transaction", txID))
+	logToServer(kv.Port, fmt.Sprintf("tx %s: Starting COMMIT phase for the transaction", txID), "red")
 	if args.Delay > 0 {
-		logToServer(kv.Port, fmt.Sprintf("Sleeping with delay %d secs", args.Delay))
+		logToServer(kv.Port, fmt.Sprintf("Sleeping with delay %d secs", args.Delay), "blue")
 		if args.Delay == 50 {
 			kv.Kill()
 		}
@@ -351,7 +351,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 			logToServer(kv.Port, fmt.Sprintf(
 				"tx %s: COMMIT %s %q → FAILED (no group %d)",
 				txID, opTypeName(op.Type), key, gid,
-			))
+			), "blue")
 			break
 		}
 
@@ -371,7 +371,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 					logToServer(kv.Port, fmt.Sprintf(
 						"tx %s: COMMIT GET %q → %q",
 						txID, key, gr.Value,
-					))
+					), "blue")
 					got = true
 					break
 				}
@@ -381,7 +381,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 				logToServer(kv.Port, fmt.Sprintf(
 					"tx %s: COMMIT GET %q → FAILED",
 					txID, key,
-				))
+				), "blue")
 			}
 
 		case PUT, APPEND:
@@ -401,7 +401,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 					logToServer(kv.Port, fmt.Sprintf(
 						"tx %s: COMMIT %s %q → OK",
 						txID, pa.Op, key,
-					))
+					), "blue")
 					done = true
 					break
 				}
@@ -411,7 +411,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 				logToServer(kv.Port, fmt.Sprintf(
 					"tx %s: COMMIT %s %q → FAILED",
 					txID, pa.Op, key,
-				))
+				), "blue")
 			}
 
 		default:
@@ -419,7 +419,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 			logToServer(kv.Port, fmt.Sprintf(
 				"tx %s: COMMIT UnknownOp(%d) → FAILED",
 				txID, op.Type,
-			))
+			), "blue")
 		}
 
 		if !commitOK {
@@ -428,24 +428,6 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	}
 
 	// 10) Set overall reply.Err
-	if commitOK {
-		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase succeeded", txID))
-	} else {
-		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase failed, rolling back", txID))
-		commitOp := Op{
-			Type:        TX_ABORT,
-			TxID:        txID,
-			ClientUuid:  args.ClientId,
-			ClientReqNo: args.RequestNumber,
-		}
-		idx, term, _ := kv.rf.Start(commitOp)
-		ch := make(chan *InternalResp, 1)
-		kv.mu.Lock()
-		kv.ReplyWaitChan[termIndexToString(term, idx)] = ch
-		kv.mu.Unlock()
-		<-ch
-		reply.Err = "CommitFailed"
-	}
 
 	// 11) Always unlock everything before returning
 	allGroups := make(map[int][]string)
@@ -461,7 +443,7 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 			if srv.Call("ShardKV.UnlockKeys", ua, &ur) && ur.Err == OK {
 				logToServer(kv.Port, fmt.Sprintf(
 					"tx %s: UNLOCK group %d keys %v",
-					txID, gid, keys))
+					txID, gid, keys), "blue")
 				break
 			}
 		}
@@ -479,6 +461,26 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	kv.mu.Unlock()
 	<-ch
 	reply.Err = OK
+
+	if commitOK {
+		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase succeeded", txID), "blue")
+	} else {
+		logToServer(kv.Port, fmt.Sprintf("tx %s: COMMIT phase failed, rolling back", txID), "blue")
+		commitOp := Op{
+			Type:        TX_ABORT,
+			TxID:        txID,
+			ClientUuid:  args.ClientId,
+			ClientReqNo: args.RequestNumber,
+		}
+		idx, term, _ := kv.rf.Start(commitOp)
+		ch := make(chan *InternalResp, 1)
+		kv.mu.Lock()
+		kv.ReplyWaitChan[termIndexToString(term, idx)] = ch
+		kv.mu.Unlock()
+		<-ch
+		reply.Err = "CommitFailed"
+	}
+
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -532,7 +534,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *ShardKV) abortAllPending() {
 	// 1) Snapshot the pendingTxs under lock
 	kv.mu.Lock()
-	logToServer(kv.Port, fmt.Sprintf("Aborting %d pending transactions...", len(kv.pendingTxs)))
+	logToServer(kv.Port, fmt.Sprintf("Aborting %d pending transactions...", len(kv.pendingTxs)), "yellow")
 	pending := make(map[string][]Op, len(kv.pendingTxs))
 	for txID, ops := range kv.pendingTxs {
 		pending[txID] = ops
@@ -652,7 +654,6 @@ func (kv *ShardKV) handleOp(op Op) (reply string, isValid bool) {
 			}
 			reply = val
 		} else if op.Type == PUT {
-			logToServer(kv.Port, fmt.Sprintf("added key %s with value %s", op.Arg1, op.Arg2))
 			kv.kv[op.Arg1] = op.Arg2
 		} else {
 			oldVal, ok := kv.kv[op.Arg1]
@@ -776,7 +777,7 @@ func (kv *ShardKV) applyHandler() {
 						"Server %d: applied Op{%s, %q, %q} at index %d (term %d) — SUCCESS",
 						kv.me, opTypeName(op.Type), op.Arg1, op.Arg2,
 						applyMsg.CommandIndex, applyMsg.CommandTerm,
-					))
+					), "green")
 				}
 
 				kv.shardLock.Unlock()
@@ -1315,13 +1316,13 @@ func (kv *ShardKV) LockKeys(args *LockArgs, reply *LockReply) {
 		logToServer(kv.Port, fmt.Sprintf(
 			"LockKeys[%s]: SUCCESS. locked %v on server %d",
 			args.TxID, lockedKeys, kv.me,
-		))
+		), "yellow")
 		reply.Err = OK
 	} else {
 		logToServer(kv.Port, fmt.Sprintf(
 			"LockKeys[%s]: FAILED. locked %v; failed %v on server %d",
 			args.TxID, lockedKeys, failedKeys, kv.me,
-		))
+		), "yellow")
 		reply.Err = KeyLocked
 	}
 }
@@ -1376,13 +1377,13 @@ func (kv *ShardKV) UnlockKeys(args *UnlockArgs, reply *UnlockReply) {
 		logToServer(kv.Port, fmt.Sprintf(
 			"UnlockKeys[%s]: SUCCESS – unlocked %v on server %d",
 			args.TxID, unlockedKeys, kv.me,
-		))
+		), "yellow")
 		reply.Err = OK
 	} else {
 		logToServer(kv.Port, fmt.Sprintf(
 			"UnlockKeys[%s]: PARTIAL FAILURE – unlocked %v; failed %v on server %d",
 			args.TxID, unlockedKeys, failedKeys, kv.me,
-		))
+		), "yellow")
 		reply.Err = KeyLocked // or a dedicated ErrUnlockFailed
 	}
 }

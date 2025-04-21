@@ -184,16 +184,23 @@ func createContainer(image, containerName string) (string, string, error) {
 	return resp.ID, assignedHostPort, nil
 }
 
-func logToServer(port string, message string) error {
+func logToServer(port string, message string, color string) error {
+	if len(port) < 3 {
+		return nil
+	}
+
 	// Construct the URL where the log server is listening.
 	url := "http://localhost:" + port + "/log"
 
+	// Create the log data (including the color as part of the message)
+	logData := fmt.Sprintf("color=%s&message=%s", color, message)
+
 	// Create a new POST request with the log message as the body.
-	req, err := http.NewRequest("POST", url, strings.NewReader(message))
+	req, err := http.NewRequest("POST", url, strings.NewReader(logData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
-	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// Create an HTTP client with a timeout.
 	client := &http.Client{Timeout: 3 * time.Second}

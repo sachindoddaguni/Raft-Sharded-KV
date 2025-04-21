@@ -883,7 +883,7 @@ func (rf *Raft) convertToLeader() {
 		}
 	}
 	formatted := fmt.Sprintf("I am elected as the leader for the term %d", rf.currentTerm)
-	logToServer(rf.Port, formatted)
+	logToServer(rf.Port, formatted, "green")
 	//rf.PrintState()
 }
 
@@ -898,7 +898,7 @@ func (rf *Raft) convertToFollower(votedFor int) {
 	rf.currentState = FOLLOWER
 	rf.persist(false)
 	formatted := fmt.Sprintf("I am follower for the term %d", rf.currentTerm)
-	logToServer(rf.Port, formatted)
+	logToServer(rf.Port, formatted, "green")
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
