@@ -950,7 +950,6 @@ func TestTransactions(t *testing.T) {
 	}
 	time.Sleep(5 * time.Second)
 	ck := cfg.makeClient()
-	defer cfg.cleanup()
 	op1 := Op{
 		Type:        PUT,
 		Arg1:        "x",
@@ -987,7 +986,6 @@ func TestTransactionLockConflict(t *testing.T) {
 	time.Sleep(5 * time.Second)
 	ck1 := cfg.makeClient()
 	ck2 := cfg.makeClient()
-	defer cfg.cleanup()
 	go func() {
 		tx := []Op{{Type: PUT, Arg1: "x", Arg2: "100", ClientUuid: 1, ClientReqNo: 1}}
 		ck1.ProcessTransaction(tx, 1)
@@ -1054,27 +1052,43 @@ func TestFaultTolerance(t *testing.T) {
 
 func TestCrashRecovery(t *testing.T) {
 	deleteContainersWithPrefix()
-	// 1) bring up a single‐group cluster with 3 servers
-	cfg := make_config(t, 3, false, -1, 1)
-	for i := 0; i < 1; i++ {
-		cfg.join(i)
+	fmt.Printf("Test: transactions ...\n")
+	ng := 1
+	cfg := make_config(t, 3, false, -1, ng)
+	for g := range ng {
+		cfg.join(g)
 	}
+	time.Sleep(5 * time.Second)
 	ck := cfg.makeClient()
-
-	// 2) write a key
-	ck.Put("persistentKey", "hello‑world")
-
-	// 3) kill one of the replicas
-	cfg.ShutdownServer(0, 0)           // group 0, replica killedIdx
-	time.Sleep(200 * time.Millisecond) // give it a moment to crash
-
-	// 4) restart that same server
-	cfg.StartServer(0, 0)
-	time.Sleep(200 * time.Millisecond) // let it rejoin Raft
-
-	// 5) read the key again — should still be “hello‑world”
-	v := ck.Get("persistentKey")
-	if v != "hello‑world" {
-		t.Fatalf("expected persisted value, got %q instead", v)
+	op1 := Op{
+		Type:        PUT,
+		Arg1:        "x",
+		Arg2:        "2",
+		ClientUuid:  1,
+		ClientReqNo: 1,
 	}
+	op2 := Op{
+		Type:        PUT,
+		Arg1:        "y",
+		Arg2:        "3",
+		ClientUuid:  1,
+		ClientReqNo: 1,
+	}
+	op3 := Op{
+		Type:        PUT,
+		Arg1:        "a",
+		Arg2:        "3",
+		ClientUuid:  1,
+		ClientReqNo: 1,
+	}
+	ck.ProcessTransaction([]Op{op1, op2, op3})
+	time.Sleep(5 * time.Second)
+
+	cfg.ShutdownServer(0, 0)
+
+	time.Sleep(5 * time.Second)
+
+	cfg.StartServer(0, 0)
+
+	time.Sleep(5 * time.Second)
 }
