@@ -126,7 +126,7 @@ func (cfg *config) makeClient() *Clerk {
 
 	// ClientEnds to talk to controler service.
 	ends := make([]*labrpc.ClientEnd, cfg.nctrlers)
-	endnames := make([]string, cfg.n)
+	endnames := make([]string, cfg.nctrlers)
 	for j := 0; j < cfg.nctrlers; j++ {
 		endnames[j] = randstring(20)
 		ends[j] = cfg.net.MakeEnd(endnames[j])

@@ -1051,3 +1051,30 @@ func TestFaultTolerance(t *testing.T) {
 		t.Fatalf("expected y == \"200\" after transaction, got %q", v)
 	}
 }
+
+func TestCrashRecovery(t *testing.T) {
+	deleteContainersWithPrefix()
+	// 1) bring up a single‐group cluster with 3 servers
+	cfg := make_config(t, 3, false, -1, 1)
+	for i := 0; i < 1; i++ {
+		cfg.join(i)
+	}
+	ck := cfg.makeClient()
+
+	// 2) write a key
+	ck.Put("persistentKey", "hello‑world")
+
+	// 3) kill one of the replicas
+	cfg.ShutdownServer(0, 0)           // group 0, replica killedIdx
+	time.Sleep(200 * time.Millisecond) // give it a moment to crash
+
+	// 4) restart that same server
+	cfg.StartServer(0, 0)
+	time.Sleep(200 * time.Millisecond) // let it rejoin Raft
+
+	// 5) read the key again — should still be “hello‑world”
+	v := ck.Get("persistentKey")
+	if v != "hello‑world" {
+		t.Fatalf("expected persisted value, got %q instead", v)
+	}
+}

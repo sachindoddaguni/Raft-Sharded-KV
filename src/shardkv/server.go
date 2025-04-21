@@ -333,6 +333,9 @@ func (kv *ShardKV) ProcessTransaction(args *TxOp, reply *GetReply) {
 	logToServer(kv.Port, fmt.Sprintf("tx %s: Starting COMMIT phase for the transaction", txID))
 	if args.Delay > 0 {
 		logToServer(kv.Port, fmt.Sprintf("Sleeping with delay %d secs", args.Delay))
+		if args.Delay == 50 {
+			kv.Kill()
+		}
 		time.Sleep(time.Duration(args.Delay) * time.Second)
 	}
 

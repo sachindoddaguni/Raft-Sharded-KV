@@ -253,16 +253,28 @@ func deleteContainersWithPrefix() error {
 }
 
 func killContainer(containerID string, signal string) error {
-	// 1. Initialize a client from environment (DOCKER_HOST, etc.)
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	// 1. Initialize client
+	cli, err := client.NewClientWithOpts(
+		client.FromEnv,
+		client.WithAPIVersionNegotiation(),
+	)
 	if err != nil {
 		return fmt.Errorf("unable to create Docker client: %w", err)
 	}
+	ctx := context.Background()
 
-	// 2. Send the signal to the container
-	//    signal can be "SIGKILL", "SIGTERM", "SIGINT", or a numeric string like "9"
-	if err := cli.ContainerKill(context.Background(), containerID, signal); err != nil {
+	// 2. Kill (signal) the container
+	if err := cli.ContainerKill(ctx, containerID, signal); err != nil {
 		return fmt.Errorf("failed to kill container %q: %w", containerID, err)
+	}
+
+	// 3. Remove the container metadata (force just in case it’s still running)
+	removeOpts := types.ContainerRemoveOptions{
+		Force:         true,  // will send SIGKILL if somehow still running
+		RemoveVolumes: false, // set to true if you also want to drop anonymous volumes
+	}
+	if err := cli.ContainerRemove(ctx, containerID, removeOpts); err != nil {
+		return fmt.Errorf("failed to remove container %q: %w", containerID, err)
 	}
 
 	return nil
