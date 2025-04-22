@@ -65,7 +65,7 @@ func getColorCode(color string) string {
 
 func main() {
 	http.HandleFunc("/log", logHandler)
-	log.Println("Log server listening on :8080")
+	log.Println("KV server listening on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("ListenAndServe failed: %v", err)
 	}
