@@ -25,6 +25,7 @@ Features Added:
 - Go : 1.22.3^
 
 ### Running Containers
+The setup does not have  CLI. Since interface are thorugh code(SDK), the following tests helps to visualise the containers and networl communications.
  [`transaction_test.go`](./src/shardkv/transaction_test.go) : contains 4 tests where each tests spwans up new environment with the configured number of containers.
   - Test 1: Test 1 spwans up 2 replica groups i.e 6 containers. 3 containers are spawned up for shard controllers. The test further tests a output of a simple transaction with 3 put operations
   - Test 2: Test 2 spawns an environment similar to test 1. 9 total containers are created for each machine. The test specifically tests a conflict scenario where two transactions operate on the same data. We expect the system to abort one of the transactions.
