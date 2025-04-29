@@ -48,3 +48,64 @@ Features Added:
   - _logToServer_ - common logging function
 - [`Dockerfile`](./src/docker-setup/Dockerfile) - Docker Image Setup
   - Each docker image has both the RAFT layer code and Application layer code. The dockerfile packages both the layers into a single image.   
+
+  Here is a concise breakdown of every file in `pkg/rpc/` (our network I/O abstraction) and the benchmark driver:
+
+---
+### Samarth
+### `pkg/rpc/kvrpc/encoder.go`  
+Wraps `labgob.LabEncoder` into a simple `Encode(v interface{})` API that all RPCs use to serialize request and response objects before writing them to the wire.
+
+### `pkg/rpc/kvrpc/decoder.go`  
+Wraps `labgob.LabDecoder` into a simple `Decode(v interface{})` API that all RPC handlers and clients use to deserialize incoming bytes back into Go structs.
+
+### `pkg/rpc/kvrpc/codec.go`  
+Implements both `rpc.ServerCodec` and `rpc.ClientCodec` over any `io.ReadWriteCloser`:
+- `NewServerCodec(conn)` → used in `rpc.ServeCodec` on the server side  
+- `NewClientCodec(conn)` → used in `rpc.NewClientWithCodec` on the client side  
+It wires together our `Encoder`/`Decoder` with request/response header marshaling, ensuring thread‐safe writes.
+
+### `pkg/rpc/kvrpc/register.go`  
+`init()`‐time calls to `labgob.Register(...)` for every RPC argument and reply type (`Op`, `ConfigChange`, `LockArgs`, etc.), so you never forget to register a new struct and get mysterious decode failures.
+
+### `pkg/rpc/kvrpc/marshal.go`  
+Standalone `Marshal(v)` / `Unmarshal(data, &v)` helpers based on `LabEncoder`/`LabDecoder`, used for snapshotting or any place you need to turn structs into `[]byte` and back.
+
+### `pkg/rpc/kvrpc/listener.go`  
+A small `Serve(addr, name, svc interface{})` helper that:  
+1. `rpc.RegisterName(name, svc)`  
+2. `net.Listen("tcp", addr)`  
+3. Accepts connections in a loop and calls `rpc.ServeCodec(NewServerCodec(conn))`  
+
+### `pkg/rpc/kvrpc/bufferpool.go`  
+A `sync.Pool` of `bytes.Buffer` to reuse buffers for marshalling, reducing GC pressure under high‐rate RPC workloads.
+
+### `pkg/rpc/dialer.go`  
+Exports a single `DialWithTimeout(addr, timeout)` function that:  
+1. `net.DialTimeout("tcp", addr, timeout)`  
+2. Wraps the returned `net.Conn` in `labgobrpc.NewClientCodec`  
+3. Returns an `*rpc.Client`  
+This centralizes all host:port parsing, timeouts, and codec wiring for clients.
+
+### `performance/benchmark.go`  
+Our Go benchmarking tool, driven by flags (`-scenario`, `-clients`, `-duration`, etc.). Key parts:
+
+- **Initialization**  
+  - Parses `-ctrl`, `-scenario`, `-conflict`, `-txsize`, `-pattern` flags  
+  - Constructs a shard‐controller clerk, issues initial `Join`  
+
+- **Client Workers**  
+  - Spawns `c` goroutines for `duration` seconds  
+  - Each goroutine makes a scenario‐specific RPC loop (`Get`, `Get+lock`, or various `ProcessTransaction` patterns)  
+  - Pushes each operation’s latency into a buffered channel  
+
+- **Aggregation & Statistics**  
+  - Drains the `results` channel into a slice  
+  - Computes mean, p95, p99 latencies and throughput (ops/sec)  
+  - Prints a summary table  
+
+- **Workload Generators**  
+  - `randomKey()`, `hotKey()` for uniform vs. hot‐key selection  
+  - `randomConflictTxOps(conflictRatio)` for 3‐key hot‐spot contention  
+  - `randomSingleGroupTxOps(txSize)` & `randomCrossGroupTxOps(txSize)` for single‐ vs. cross‐shard batches  
+  - `randomFanoutTxOps(txSize, pattern)` to switch between co‐located and spread patterns  
