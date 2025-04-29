@@ -50,7 +50,7 @@ Features Added:
   - _createContainer_ - Create Container for each machine. Stores the container id and public port in a struct
   - _deleteContainersWithPrefix_ - Used to clean up environment
   - _logToServer_ - common logging function
-- [`server.go`](./src/shardctrler/server.go)
+- [`serverctler.go`](./src/shardctrler/server.go)
   - _StartServer_ - Start a shard controller container service
   - _handleLeave_ - Handle replica group machine movement i.e leave or join
 - [`raft.go`](./src/raft/raft.go)
