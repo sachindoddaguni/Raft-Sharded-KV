@@ -1,43 +1,50 @@
 # Fault-tolerant Sharded Key-Value Storage service
 
-Built as a part of [MIT-6.824 Distributed Systems Labs](https://pdos.csail.mit.edu/6.824/)
+<img width="1012" alt="image" src="https://github.com/user-attachments/assets/78041db7-edaf-4973-bcda-a24e4b6baa5e" />
 
-- [x] Lab 1: MapReduce (Warmup / Practice exercise)
-- [x] Lab 2: Raft Protocol
-- [x] Lab 3: Fault-tolerant Key/Value Service
-- [x] Lab 4: Sharded Key/Value Service
+Existing Features
+
+- Raft Layer
+- Fault Tolerant : Replication
+- Dynamic Sharding
+
+Features Added:
+
+- Fault tolerant 2PC coordinator
+- Spanner Like 2 PC
+- Network I/O for all the layers
+- Containerized implementation for all the layers
 
 
-## Key Features
-- `Put / Get / Append` calls
-- **Replicated & Fault Tolerant**: Able to serve requests as long as a majority of servers are up and can communicate, inspite of other failures or network partitions.
-- **Linearizabile**: Users can assume that they are talking to a single machine and that all the requests are processed in a single global order. A call will also observe the effects of calls that have completed before it starts. 
-- **Scalable**: Supports dynamically adding/reconfiguring servers and shards for boosting performance, with zero downtime, i.e. the requests on unaffected keys can keep going on during the reconfiguration. 
+## Steps to run
 
+### Requirements
+- 16GB+ RAM
+- Tested on MAC M3, 16GB RAM
+- Docker
+- Go - 1.22.3^
 
-## Implementation
-### RAFT Consensus Algorithm
-![image](https://github.com/RamneekSingh24/Raft-Sharded-KV/assets/74413910/6ab1baea-87fb-48a0-b979-d67c70c118c7)  
-
-The Key Value Service uses the [RAFT Consensus Algorithm](https://web.stanford.edu/~ouster/cgi-bin/papers/raft-atc14) to maintain a replicated, fault tolerant and consistent state across peers.  
-As described in the RAFT Paper, we implement a leader election and a replicated log. The log and some other necessary state is persisted for handling fail-overs and maintaining consistency.  
-
-As an optimization for improving memory utilization and recovery times, we implement a **snap-shotting and log compaction mechanism** all while keeping the state consistent across fail-overs.  
-We also implement other optimizations like log-conflicted detection (mentioned in the [Extended RAFT paper](https://web.stanford.edu/~ouster/cgi-bin/papers/raft-atc14)) that aims to reduce the number of RPCs between peers.  
-
-### Key Value Service
-Next, on top of RAFT we build a simple Key Value storage service that supports Put/Get/Append calls and manages snap-shotting and log compaction whenever the memory used by the log approaches a threshold.  
-The service is consistent and gracefully handles failures and client retries. The client request are idempotent and the service makes sure that duplicate requests/retries and only executed once, across server failures and snapshots!
-
-<img width="835" alt="image" src="https://github.com/RamneekSingh24/Raft-Sharded-KV/assets/74413910/e4a529e0-7c28-4ac7-93a2-69aa5e8ba64a">
-
-### Sharding the Key Value Store
-Since Linearizability is Local/Composable ([Ref: Section 3.3](http://www.cs.cmu.edu/~awing/publications/CMU-CS-88-120.pdf)), we can scale the system by shading the key space across different and independent group of RAFT Peers.  
-We can partition the servers into different replica-groups of RAFT Peers, where each group with handle a set of shards and execute independently. This allows us to scale the throughput by adding more groups/servers.  
-
-We implement a `Shard Controller` service that manages the sharding config, i.e. mapping of shard to replica group. 
-The service is again built on top of RAFT to provide high availability and fault tolerance. This service supports `Join`, `Leave` RPCs to add/remove replica groups, `Move` RPC to migrate a shard from one group to another, and `Query` RPC to query the configuration.  
-`Join` and `Leave` will evenly distribute the shards across groups.  
-
-The service as a whole provides linearizability to the clients even when shards are being moved around and reconfigured.  
-During a reconfiguration of shards, the clients do no perceive any downtime for the unaffected keys!
+### Running Containers
+ [`transaction_test.go`](./src/shardkv/transaction_test.go) : contains 4 tests where each tests spwans up new environment with the configured number of containers.
+  - Test 1: Test 1 spwans up 2 replica groups i.e 6 containers. 3 containers are spawned up for shard controllers. The test further tests a output of a simple transaction with 3 put operations
+  - Test 2: Test 2 spawns an environment similar to test 1. 9 total containers are created for each machine. The test specifically tests a conflict scenario where two transactions operate on the same data. We expect the system to abort one of the transactions.
+  - Test 3: The test 3 aims at testing the fault tolerance feature of the coordinator. The tests kills a coordinator holding locks and tests whether the system recovers from this scenario. The test expects the new leader to clear all the pre held locks when a new leader is elected.
+  - Test 4: The test 4 tests the crash recovery ability of an individual machine. Each machine recovers its state from the RAFT logs and the tests ensures that the system comes into a valid state after crash recovery.
+ 
+## Project Contribution:
+### Sachin
+- [`transaction.go`](./src/shardkv/transaction.go) - Developed the client SDK to communicate with the shard controllers and replica groups
+- [`server.go`](./src/shardkv/server.go) - Contains the code for various server side RPCs
+  - _ProcessTransaction_ - RPC to process a trnasaction as a transaction coordinator
+  - _LockKeys_ - RPC to Lock Keys which are mentioned in the arguments
+  - _UnLockKeys_ - RPC to Unlock specified keys
+  - _abortAllPending_ - Abort all pending transactions. The method is used during crash recovery.
+  - _applyHandler_ - Handle specific RPCs
+  - _Kill_ - Kill a specific server i.e container in our setup
+  - _stateCompactor_ - Used for snaphotting RAFT logs. RAFT logs are compacted for every 20 entries and the in memory state is stored. 
+- [`common.go`](./src/shardkv/common.go) - Contains the code for common unitilit behaviour
+  - _createContainer_ - Create Container for each machine. Stores the container id and public port in a struct
+  - _deleteContainersWithPrefix_ - Used to clean up environment
+  - _logToServer_ - common logging function
+- [`Dockerfile`](./src/docker-setup/Dockerfile) - Docker Image Setup
+  - Each docker image has both the RAFT layer code and Application layer code. The dockerfile packages both the layers into a single image.   
