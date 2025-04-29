@@ -54,5 +54,8 @@ Features Added:
   - _StartServer_ - Start a shard controller container service
   - _handleLeave_ - Handle replica group machine movement i.e leave or join
 - [`raft.go`](./src/raft/raft.go)
+  - _persist_ - persist raft entries to on disk logs i.e to a log file on the container disk
+  - _snapshot_ - compact raft entries and store the snapshot in disk
+  - _readPersist_ - Read in memory state from raft logs
 - [`Dockerfile`](./src/docker-setup/Dockerfile) - Docker Image Setup
   - Each docker image has both the RAFT layer code and Application layer code. The dockerfile packages both the layers into a single image.  
