@@ -63,58 +63,43 @@ Features Added:
 ---
 ### Samarth
 
-### `./src/rpc/kvrpc/encoder.go`  
-Wraps `labgob.LabEncoder` into a simple `Encode(v interface{})` API that all RPCs use to serialize request and response objects before writing them to the wire.
+- [`encoder.go`](./src/rpc/kvrpc/encoder.go)  
+  Wraps `labgob.LabEncoder` into a simple `Encode(v interface{})` API that all RPCs use to serialize request and response objects before writing them to the wire.
 
-### `./src/rpc/kvrpc/decoder.go`  
-Wraps `labgob.LabDecoder` into a simple `Decode(v interface{})` API that all RPC handlers and clients use to deserialize incoming bytes back into Go structs.
+- [`decoder.go`](./src/rpc/kvrpc/decoder.go)  
+  Wraps `labgob.LabDecoder` into a simple `Decode(v interface{})` API that all RPC handlers and clients use to deserialize incoming bytes back into Go structs.
 
-### `./src/rpc/kvrpc/codec.go`  
-Implements both `rpc.ServerCodec` and `rpc.ClientCodec` over any `io.ReadWriteCloser`:  
-- `NewServerCodec(conn)` → used in `rpc.ServeCodec` on the server side  
-- `NewClientCodec(conn)` → used in `rpc.NewClientWithCodec` on the client side  
+- [`codec.go`](./src/rpc/kvrpc/codec.go)  
+  Implements both `rpc.ServerCodec` and `rpc.ClientCodec` over any `io.ReadWriteCloser`:  
+  - `NewServerCodec(conn)` → used in `rpc.ServeCodec` on the server side  
+  - `NewClientCodec(conn)` → used in `rpc.NewClientWithCodec` on the client side  
+  It wires together our `Encoder`/`Decoder` with request/response header marshaling, ensuring thread-safe writes.
 
-It wires together our `Encoder`/`Decoder` with request/response header marshaling, ensuring thread-safe writes.
+- [`register.go`](./src/rpc/kvrpc/register.go)  
+  Contains `init()`-time calls to `labgob.Register(...)` for every RPC argument and reply type (`Op`, `ConfigChange`, `LockArgs`, etc.), so you never forget to register a new struct and encounter decode failures.
 
-### `./src/rpc/kvrpc/register.go`  
-Contains `init()`-time calls to `labgob.Register(...)` for every RPC argument and reply type (`Op`, `ConfigChange`, `LockArgs`, etc.), so you never forget to register a new struct and encounter decode failures.
+- [`marshal.go`](./src/rpc/kvrpc/marshal.go)  
+  Provides standalone `Marshal(v)` / `Unmarshal(data, &v)` helpers based on `LabEncoder`/`LabDecoder`, used for snapshotting or any place you need to turn structs into `[]byte` and back.
 
-### `./src/rpc/kvrpc/marshal.go`  
-Provides standalone `Marshal(v)` / `Unmarshal(data, &v)` helpers based on `LabEncoder`/`LabDecoder`, used for snapshotting or any place you need to turn structs into `[]byte` and back.
+- [`listener.go`](./src/rpc/kvrpc/listener.go)  
+  A helper function that:  
+  1. `rpc.RegisterName(name, svc)`  
+  2. `net.Listen("tcp", addr)`  
+  3. Accepts connections in a loop and calls `rpc.ServeCodec(NewServerCodec(conn))`
 
-### `./src/rpc/kvrpc/listener.go`  
-A helper function:
-1. `rpc.RegisterName(name, svc)`  
-2. `net.Listen("tcp", addr)`  
-3. Accepts connections in a loop and calls `rpc.ServeCodec(NewServerCodec(conn))`  
+- [`bufferpool.go`](./src/rpc/kvrpc/bufferpool.go)  
+  Defines a `sync.Pool` of `bytes.Buffer` to reuse buffers for marshalling, reducing GC pressure under high-rate RPC workloads.
 
-### `./src/rpc/kvrpc/bufferpool.go`  
-Defines a `sync.Pool` of `bytes.Buffer` to reuse buffers for marshalling, reducing GC pressure under high-rate RPC workloads.
+- [`dialer.go`](./src/rpc/dialer.go)  
+  Exports `DialWithTimeout(addr, timeout)` which:  
+  1. `net.DialTimeout("tcp", addr, timeout)`  
+  2. Wraps the returned `net.Conn` in `labgobrpc.NewClientCodec`  
+  3. Returns an `*rpc.Client`  
+  This centralizes all host:port parsing, timeouts, and codec wiring for clients.
 
----
-
-### `./src/performance/benchmark.go`  
-Our Go benchmarking driver, configurable via flags (`-scenario`, `-clients`, `-duration`, etc.). Key components:
-
-- **Initialization**  
-  - Parses controller addresses (`-ctrl`), workload scenario (`-scenario`), conflict ratio, transaction size, and fan-out pattern flags.  
-  - Constructs a shard-controller clerk and issues the initial `Join` configuration.
-
-- **Client Workers**  
-  - Spawns the configured number of goroutines for the benchmark duration.  
-  - Each goroutine runs a tight loop issuing one of:  
-    - Read-only GETs  
-    - GETs with explicit lock  
-    - Multi-key transactions under various patterns (conflict, single-group, cross-group, size/fan-out).  
-  - Records each operation’s latency into a buffered channel.
-
-- **Aggregation & Statistics**  
-  - Collects all latency samples, then computes mean, p95, p99 latencies and overall throughput (ops/sec).  
-  - Outputs a summary table at the end of the run.
-
-- **Workload Generators**  
-  - `randomKey()`, `hotKey()` for uniform vs. hot-key selection  
-  - `randomConflictTxOps()` for 3-key hot-spot contention  
-  - `randomSingleGroupTxOps()`, `randomCrossGroupTxOps()` for single- vs. cross-shard batches  
-  - `randomFanoutTxOps()` to switch between co-located and spread patterns
-
+- [`benchmark.go`](./src/performance/benchmark.go)  
+  Our Go benchmarking driver, configurable via flags (`-scenario`, `-clients`, `-duration`, etc.).  
+  - **Initialization**: parses flags, constructs a shard‐controller clerk, issues initial `Join`.  
+  - **Client Workers**: spawns goroutines issuing `Get`, `Get+lock`, or various `ProcessTransaction` patterns, recording per-op latencies.  
+  - **Aggregation & Statistics**: computes mean, p95, p99 latencies and throughput.  
+  - **Workload Generators**: functions for uniform vs. hot-key GETs, conflict‐ratio transactions, single‐group vs. cross‐group batches, and fan‐out patterns.
