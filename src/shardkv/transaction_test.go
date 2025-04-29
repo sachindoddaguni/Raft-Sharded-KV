@@ -111,6 +111,7 @@ func TestFaultTolerance(t *testing.T) {
 			break
 		}
 	}
+
 	time.Sleep(5 * time.Second)
 	tx2 := []Op{{Type: PUT, Arg1: "x", Arg2: "200", ClientUuid: 2, ClientReqNo: 1}, {Type: PUT, Arg1: "y", Arg2: "200", ClientUuid: 2, ClientReqNo: 102}}
 	err := ck2.ProcessTransaction(tx2)
@@ -159,7 +160,14 @@ func TestCrashRecovery(t *testing.T) {
 		ClientUuid:  1,
 		ClientReqNo: 1,
 	}
-	ck.ProcessTransaction([]Op{op1, op2, op3})
+	op4 := Op{
+		Type:        PUT,
+		Arg1:        "b",
+		Arg2:        "2",
+		ClientUuid:  1,
+		ClientReqNo: 1,
+	}
+	ck.ProcessTransaction([]Op{op1, op2, op3, op4})
 	time.Sleep(5 * time.Second)
 
 	cfg.ShutdownServer(0, 0)
@@ -169,4 +177,17 @@ func TestCrashRecovery(t *testing.T) {
 	cfg.StartServer(0, 0)
 
 	time.Sleep(5 * time.Second)
+
+	v := ck.Get("x")
+	if v != "2" {
+		t.Fatalf("expected x == \"2\" after transaction, got %q", v)
+	}
+	v = ck.Get("y")
+	if v != "3" {
+		t.Fatalf("expected x == \"3\" after transaction, got %q", v)
+	}
+	v = ck.Get("a")
+	if v != "3" {
+		t.Fatalf("expected x == \"3\" after transaction, got %q", v)
+	}
 }

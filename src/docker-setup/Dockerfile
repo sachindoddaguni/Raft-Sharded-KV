@@ -10,6 +10,9 @@ ENV CGO_ENABLED=0
 # Build the binary.
 RUN go build -a -installsuffix cgo -o kvserver kvserver.go
 
+# Create a directory for persistent data
+RUN mkdir /log_data
+
 # Stage 2: Create a small final image.
 FROM debian:bullseye-slim
 WORKDIR /app
