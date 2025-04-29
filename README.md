@@ -22,7 +22,7 @@ Features Added:
 - 16GB+ RAM
 - Tested on MAC M3, 16GB RAM
 - Docker
-- Go - 1.22.3^
+- Go : 1.22.3^
 
 ### Running Containers
  [`transaction_test.go`](./src/shardkv/transaction_test.go) : contains 4 tests where each tests spwans up new environment with the configured number of containers.
@@ -34,6 +34,10 @@ Features Added:
 ## Project Contribution:
 ### Sachin
 - [`transaction.go`](./src/shardkv/transaction.go) - Developed the client SDK to communicate with the shard controllers and replica groups
+  - _ProcessTransaction_ - SDK call which interfaces with the shard controller to fetch all the replica groups and assigns one of them as the coordinator
+  - _Get_ - Simple Get interface
+  - _Put_ - Simple Put interface
+  - _PutAppend_ - Append to an existing value 
 - [`server.go`](./src/shardkv/server.go) - Contains the code for various server side RPCs
   - _ProcessTransaction_ - RPC to process a trnasaction as a transaction coordinator
   - _LockKeys_ - RPC to Lock Keys which are mentioned in the arguments
@@ -46,6 +50,13 @@ Features Added:
   - _createContainer_ - Create Container for each machine. Stores the container id and public port in a struct
   - _deleteContainersWithPrefix_ - Used to clean up environment
   - _logToServer_ - common logging function
+- [`serverctler.go`](./src/shardctrler/server.go)
+  - _StartServer_ - Start a shard controller container service
+  - _handleLeave_ - Handle replica group machine movement i.e leave or join
+- [`raft.go`](./src/raft/raft.go)
+  - _persist_ - persist raft entries to on disk logs i.e to a log file on the container disk
+  - _snapshot_ - compact raft entries and store the snapshot in disk
+  - _readPersist_ - Read in memory state from raft logs
 - [`Dockerfile`](./src/docker-setup/Dockerfile) - Docker Image Setup
   - Each docker image has both the RAFT layer code and Application layer code. The dockerfile packages both the layers into a single image.   
 
@@ -109,3 +120,4 @@ Our Go benchmarking tool, driven by flags (`-scenario`, `-clients`, `-duration`,
   - `randomConflictTxOps(conflictRatio)` for 3‐key hot‐spot contention  
   - `randomSingleGroupTxOps(txSize)` & `randomCrossGroupTxOps(txSize)` for single‐ vs. cross‐shard batches  
   - `randomFanoutTxOps(txSize, pattern)` to switch between co‐located and spread patterns  
+  - Each docker image has both the RAFT layer code and Application layer code. The dockerfile packages both the layers into a single image.  
